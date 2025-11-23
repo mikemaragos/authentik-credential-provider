@@ -4,6 +4,10 @@
 #include "CredentialPacking.h"
 #include "Logger.h"
 #include <windows.h>
+
+// Define SECURITY_WIN32 before including security headers
+#define SECURITY_WIN32
+#include <security.h>
 #include <ntsecapi.h>
 #include <NTSecPKG.h>
 #include <string>
