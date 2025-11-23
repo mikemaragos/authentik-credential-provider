@@ -1,0 +1,41 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Restore NuGet packages
+      run: nuget restore src/AuthentikCredentialProvider.sln
+      
+    - name: Build solution (x64 Debug)
+      run: msbuild src/AuthentikCredentialProvider.sln /p:Configuration=Debug /p:Platform=x64
+      
+    - name: Build solution (x64 Release)
+      run: msbuild src/AuthentikCredentialProvider.sln /p:Configuration=Release /p:Platform=x64
+      
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: AuthentikCredentialProvider-Release
+        path: src/x64/Release/AuthentikCredentialProvider.dll
+        if-no-files-found: warn
+        
+    - name: Upload debug artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: AuthentikCredentialProvider-Debug
+        path: src/x64/Debug/AuthentikCredentialProvider.dll
+        if-no-files-found: warn
