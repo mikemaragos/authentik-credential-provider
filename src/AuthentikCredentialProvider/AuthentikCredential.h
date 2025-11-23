@@ -52,6 +52,7 @@ public:
     HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd, const FIELD_STATE_PAIR* rgfsp, ULONG ulAuthPackage);
 
     friend HRESULT CAuthentikCredential_CreateInstance(REFIID riid, void** ppv);
+    friend class CAuthentikProvider;  // Allow provider to create instances
 
 protected:
     CAuthentikCredential();
