@@ -242,6 +242,21 @@ The credential provider uses the **Flow Executor API** endpoint:
 POST /api/v3/flows/executor/{flow_slug}/
 ```
 
+### ❓ Do I Need an API Token?
+
+**NO!** ✅ The flow executor API is **public and requires NO authentication**.
+
+**Why?**
+- This endpoint IS the authentication mechanism itself
+- Users send credentials TO this endpoint to GET authenticated
+- No API token, no bearer token, no authentication header needed
+- Just POST username/password/OTP to the endpoint
+
+**What DOES need tokens:**
+- Authentik admin API (`/api/v3/core/*`, `/api/v3/flows/*`, etc.)
+- Creating/managing users, groups, flows via API
+- The credential provider does NOT use these endpoints
+
 **This is automatically enabled** when you create a flow, but verify:
 
 1. **Navigate to Flows & Stages → Flows**
