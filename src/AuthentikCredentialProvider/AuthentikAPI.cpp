@@ -290,9 +290,10 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     }
 
     // Read response body
-    DWORD dwSize = 0;
-    DWORD dwDownloaded = 0;
-    std::vector<char> responseBuffer;
+    {
+        DWORD dwSize = 0;
+        DWORD dwDownloaded = 0;
+        std::vector<char> responseBuffer;
 
     do
     {
@@ -334,6 +335,7 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
             hr = S_OK;
         }
     }
+    } // End of scope block
 
 cleanup:
     if (hRequest) WinHttpCloseHandle(hRequest);
