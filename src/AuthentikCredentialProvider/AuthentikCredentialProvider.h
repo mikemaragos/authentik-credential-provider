@@ -57,3 +57,6 @@ private:
     UINT_PTR _upAdviseContext;
     ULONG _ulAuthPackage;
 };
+
+// Factory function
+HRESULT CAuthentikProvider_CreateInstance(REFIID riid, void** ppv);
