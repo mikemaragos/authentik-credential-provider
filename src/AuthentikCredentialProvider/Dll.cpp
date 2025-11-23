@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <unknwn.h>
 #include <credentialprovider.h>
+#include <shlwapi.h>
+#include <new>  // for std::nothrow
 #include "AuthentikCredentialProvider.h"
 #include "Logger.h"
 #include "guid.h"
