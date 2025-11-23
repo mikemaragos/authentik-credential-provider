@@ -14,7 +14,7 @@ CAuthentikProvider::CAuthentikProvider() :
     _dwSetSerializationCred(CREDENTIAL_PROVIDER_NO_DEFAULT),
     _cpus(CPUS_INVALID),
     _pCredential(nullptr),
-    _upAdviseContext(nullptr),
+    _upAdviseContext(0),
     _ulAuthPackage(0)
 {
     DllAddRef();
