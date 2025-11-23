@@ -5,6 +5,7 @@
 #include "Logger.h"
 #include "CredentialPacking.h"
 #include "AuthentikAPI.h"
+#include "guid.h"
 #include <wincred.h>
 
 // Field state pairs for different usage scenarios
