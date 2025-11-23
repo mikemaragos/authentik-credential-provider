@@ -35,13 +35,13 @@ struct FIELD_STATE_PAIR
 // Field descriptors
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
-    { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                  CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik OTP Login",   CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Enter your credentials", CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",              CPFG_NONE },
-    { FID_PASSWORD,   CPFT_PASSWORD_TEXT, L"Password",              CPFG_NONE },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, L"OTP Code",              CPFG_NONE },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",               CPFG_NONE },
+    { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),                  CPFG_CREDENTIAL_PROVIDER_LOGO },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik OTP Login"),   CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Enter your credentials"), CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),              CPFG_NONE },
+    { FID_PASSWORD,   CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"Password"),              CPFG_NONE },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"OTP Code"),              CPFG_NONE },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),               CPFG_NONE },
 };
 
 // Initial field state pairs
