@@ -4,6 +4,7 @@
 #include "CredentialPacking.h"
 #include "Logger.h"
 #include <windows.h>
+#include <combaseapi.h>  // For CoTaskMemAlloc
 
 // Define SECURITY_WIN32 before including security headers
 #define SECURITY_WIN32
