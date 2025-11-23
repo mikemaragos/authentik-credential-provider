@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <strsafe.h>
 #include <shlguid.h>
+#include <shlwapi.h>
 #include <string>
 #include "FieldDescriptors.h"
 
