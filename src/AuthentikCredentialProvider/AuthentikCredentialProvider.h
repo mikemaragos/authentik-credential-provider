@@ -7,6 +7,14 @@
 #include <windows.h>
 #include <strsafe.h>
 #include <shlguid.h>
+#include <shlwapi.h>
+
+// Security headers
+#define SECURITY_WIN32
+#include <security.h>
+#include <ntsecapi.h>
+#include <NTSecPKG.h>
+
 #include "FieldDescriptors.h"
 
 class CAuthentikCredential;
