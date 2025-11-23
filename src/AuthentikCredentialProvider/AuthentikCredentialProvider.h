@@ -15,6 +15,11 @@
 #include <ntsecapi.h>
 #include <NTSecPKG.h>
 
+// Define NT_SUCCESS if not already defined
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+
 #include "FieldDescriptors.h"
 
 class CAuthentikCredential;
