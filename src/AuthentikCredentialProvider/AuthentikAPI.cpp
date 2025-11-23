@@ -11,13 +11,26 @@
 
 // Constructor
 AuthentikAPI::AuthentikAPI() :
-    _serverUrl(L"authentik.test.local"),
+    _serverUrl(L""),  // Will be loaded from registry
     _serverPort(443),
-    _flowSlug(L"windows-otp-auth"),
-    _useHttps(true)
+    _flowSlug(L""),   // Will be loaded from registry
+    _useHttps(true),
+    _ignoreSslErrors(false)  // Secure by default
 {
     LOG("AuthentikAPI::Constructor");
     _LoadConfiguration();
+    
+    // Validate critical configuration was loaded
+    if (_serverUrl.empty())
+    {
+        LOG("ERROR: ServerUrl not configured in registry!");
+        _serverUrl = L"localhost";  // Fallback to prevent crash
+    }
+    if (_flowSlug.empty())
+    {
+        LOG("ERROR: FlowSlug not configured in registry!");
+        _flowSlug = L"default-authentication-flow";  // Fallback
+    }
 }
 
 // Destructor
@@ -158,6 +171,22 @@ void AuthentikAPI::_LoadConfiguration()
             LOG("UseHttps: %d", _useHttps);
         }
 
+        // Read IgnoreSslErrors flag (for testing with self-signed certificates)
+        DWORD ignoreSslErrors = 0;  // Default to secure (don't ignore)
+        bufferSize = sizeof(DWORD);
+        result = RegQueryValueExW(hKey, L"IgnoreSslErrors", nullptr, nullptr, (LPBYTE)&ignoreSslErrors, &bufferSize);
+        if (result == ERROR_SUCCESS)
+        {
+            _ignoreSslErrors = (ignoreSslErrors != 0);
+            LOG("IgnoreSslErrors: %d %s", _ignoreSslErrors, 
+                _ignoreSslErrors ? "(WARNING: SSL validation disabled!)" : "(secure)");
+        }
+        else
+        {
+            _ignoreSslErrors = false;  // Secure by default
+            LOG("IgnoreSslErrors not set, defaulting to secure (validate SSL)");
+        }
+
         RegCloseKey(hKey);
     }
     else
@@ -228,8 +257,8 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         return E_FAIL;
     }
 
-    // Disable SSL certificate validation for testing (REMOVE IN PRODUCTION)
-    if (_useHttps)
+    // Disable SSL certificate validation if configured (for testing with self-signed certs)
+    if (_useHttps && _ignoreSslErrors)
     {
         DWORD dwSecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                           SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
@@ -241,7 +270,11 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
             &dwSecFlags,
             sizeof(dwSecFlags));
         
-        LOG("WARNING: SSL certificate validation disabled");
+        LOG("WARNING: SSL certificate validation disabled (IgnoreSslErrors=1 in registry)");
+    }
+    else if (_useHttps)
+    {
+        LOG("SSL certificate validation enabled (secure mode)");
     }
 
     // Set headers
