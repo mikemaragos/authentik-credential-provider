@@ -5,6 +5,12 @@
 
 #include <credentialprovider.h>
 #include <windows.h>
+#include <shlwapi.h>
+
+// Define CPFG_NONE if not defined (for older SDKs)
+#ifndef CPFG_NONE
+#define CPFG_NONE 0
+#endif
 
 // Field IDs
 enum FIELD_ID
