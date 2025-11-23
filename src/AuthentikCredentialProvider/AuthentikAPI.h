@@ -44,4 +44,5 @@ private:
     INTERNET_PORT _serverPort;
     std::wstring _flowSlug;
     bool _useHttps;
+    bool _ignoreSslErrors;  // For testing with self-signed certificates
 };
