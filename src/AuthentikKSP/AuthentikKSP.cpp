@@ -11,16 +11,19 @@
 
 // Global variables
 static long g_cDllRef = 0;
-static HINSTANCE g_hInstance = nullptr;
-static std::mutex g_keyStoreMutex;
-static std::map<std::wstring, PAUTHENTIK_KEY> g_keyStore;
+static HINSTANCE g_hInstance = NULL;
+static CRITICAL_SECTION g_csKeyStore;
+static BOOL g_bInitialized = FALSE;
+
+// Simple key storage (single key for now)
+static PAUTHENTIK_KEY g_pCurrentKey = NULL;
 
 // BCrypt algorithm provider
-static BCRYPT_ALG_HANDLE g_hRsaAlg = nullptr;
+static BCRYPT_ALG_HANDLE g_hRsaAlg = NULL;
 
 // Function table
-static NCRYPT_KEY_STORAGE_FUNCTION_TABLE g_FunctionTable = {
-    NCRYPT_KEY_STORAGE_INTERFACE_VERSION,
+static AUTHENTIK_KSP_FUNCTION_TABLE g_FunctionTable = {
+    sizeof(AUTHENTIK_KSP_FUNCTION_TABLE),
     KSPOpenProvider,
     KSPOpenKey,
     KSPCreatePersistedKey,
@@ -42,7 +45,7 @@ static NCRYPT_KEY_STORAGE_FUNCTION_TABLE g_FunctionTable = {
     KSPExportKey,
     KSPSignHash,
     KSPVerifySignature,
-    nullptr,  // PromptUser - not implemented
+    NULL,  // PromptUser - not implemented
     KSPNotifyChangeKey,
     KSPSecretAgreement,
     KSPDeriveKey,
@@ -65,14 +68,25 @@ void KSPLog(const char* format, ...)
 }
 
 // DLL reference counting
-void DllAddRef()
+void DllAddRef(void)
 {
     InterlockedIncrement(&g_cDllRef);
 }
 
-void DllRelease()
+void DllRelease(void)
 {
     InterlockedDecrement(&g_cDllRef);
+}
+
+// Initialize globals
+static void InitializeGlobals(void)
+{
+    if (!g_bInitialized)
+    {
+        InitializeCriticalSection(&g_csKeyStore);
+        g_bInitialized = TRUE;
+        KSPLog("Globals initialized");
+    }
 }
 
 // Validate provider handle
@@ -82,14 +96,12 @@ BOOL ValidateProviderHandle(NCRYPT_PROV_HANDLE hProvider)
     
     PAUTHENTIK_PROVIDER pProvider = (PAUTHENTIK_PROVIDER)hProvider;
     
-    __try {
-        if (pProvider->dwMagic != AUTHENTIK_PROVIDER_MAGIC) {
-            return FALSE;
-        }
-    }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
+    // Simple validation without SEH
+    if (IsBadReadPtr(pProvider, sizeof(AUTHENTIK_PROVIDER)))
         return FALSE;
-    }
+    
+    if (pProvider->dwMagic != AUTHENTIK_PROVIDER_MAGIC)
+        return FALSE;
     
     return TRUE;
 }
@@ -101,302 +113,340 @@ BOOL ValidateKeyHandle(NCRYPT_KEY_HANDLE hKey)
     
     PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
     
-    __try {
-        if (pKey->dwMagic != AUTHENTIK_KEY_MAGIC) {
-            return FALSE;
-        }
-    }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
+    if (IsBadReadPtr(pKey, sizeof(AUTHENTIK_KEY)))
         return FALSE;
-    }
+    
+    if (pKey->dwMagic != AUTHENTIK_KEY_MAGIC)
+        return FALSE;
     
     return TRUE;
 }
 
-// Create key from shared memory data
+// Clean up a key
+void CleanupKey(PAUTHENTIK_KEY pKey)
+{
+    if (pKey == NULL) return;
+    
+    KSPLog("CleanupKey: %S", pKey->wszKeyName);
+    
+    if (pKey->hBcryptKey)
+    {
+        BCryptDestroyKey(pKey->hBcryptKey);
+        pKey->hBcryptKey = NULL;
+    }
+    
+    if (pKey->pbCertificate)
+    {
+        SecureZeroMemory(pKey->pbCertificate, pKey->cbCertificate);
+        HeapFree(GetProcessHeap(), 0, pKey->pbCertificate);
+        pKey->pbCertificate = NULL;
+    }
+    
+    if (pKey->pbPrivateKeyBlob)
+    {
+        SecureZeroMemory(pKey->pbPrivateKeyBlob, pKey->cbPrivateKeyBlob);
+        HeapFree(GetProcessHeap(), 0, pKey->pbPrivateKeyBlob);
+        pKey->pbPrivateKeyBlob = NULL;
+    }
+    
+    SecureZeroMemory(pKey, sizeof(AUTHENTIK_KEY));
+    HeapFree(GetProcessHeap(), 0, pKey);
+}
+
+// Create key from shared memory
 PAUTHENTIK_KEY CreateKeyFromSharedMemory(PAUTHENTIK_PROVIDER pProvider)
 {
     KSPLog("CreateKeyFromSharedMemory");
     
-    if (!pProvider || !pProvider->pSharedData) {
-        KSPLog("ERROR: Invalid provider or shared data");
-        return nullptr;
+    if (pProvider == NULL || pProvider->pSharedData == NULL)
+    {
+        KSPLog("ERROR: No shared data available");
+        return NULL;
     }
     
     // Wait for mutex
-    DWORD waitResult = WaitForSingleObject(pProvider->hMutex, 5000);
-    if (waitResult != WAIT_OBJECT_0) {
-        KSPLog("ERROR: Failed to acquire mutex: %d", waitResult);
-        return nullptr;
+    if (pProvider->hMutex)
+    {
+        DWORD waitResult = WaitForSingleObject(pProvider->hMutex, 5000);
+        if (waitResult != WAIT_OBJECT_0)
+        {
+            KSPLog("ERROR: Failed to acquire mutex");
+            return NULL;
+        }
     }
     
-    PAUTHENTIK_KEY pKey = nullptr;
+    PAUTHENTIK_KEY pKey = NULL;
+    PAUTHENTIK_SHARED_DATA pData = pProvider->pSharedData;
     
-    __try {
-        PAUTHENTIK_SHARED_DATA pData = pProvider->pSharedData;
-        
-        // Validate shared memory
-        if (pData->dwMagic != AUTHENTIK_SHARED_MAGIC) {
-            KSPLog("ERROR: Invalid shared memory magic: 0x%08X", pData->dwMagic);
-            __leave;
-        }
-        
-        if (!pData->bDataReady) {
-            KSPLog("ERROR: Shared data not ready");
-            __leave;
-        }
-        
-        if (pData->cbCertificate == 0 || pData->cbPrivateKey == 0) {
-            KSPLog("ERROR: Empty certificate or private key");
-            __leave;
-        }
-        
-        KSPLog("Creating key for user: %S", pData->wszUsername);
-        KSPLog("Certificate size: %d, Key size: %d", pData->cbCertificate, pData->cbPrivateKey);
-        
-        // Allocate key structure
-        pKey = new AUTHENTIK_KEY();
-        ZeroMemory(pKey, sizeof(AUTHENTIK_KEY));
-        
-        pKey->dwMagic = AUTHENTIK_KEY_MAGIC;
-        pKey->wszUsername = pData->wszUsername;
-        pKey->wszKeyName = AUTHENTIK_KEY_PREFIX + pKey->wszUsername;
-        pKey->dwKeySpec = pData->dwKeySpec;
-        pKey->bFromSharedMemory = TRUE;
-        
-        // Copy certificate
+    // Validate magic
+    if (pData->dwMagic != AUTHENTIK_SHARED_MAGIC)
+    {
+        KSPLog("ERROR: Invalid shared memory magic: 0x%08X", pData->dwMagic);
+        goto cleanup;
+    }
+    
+    // Check if data is ready
+    if (!pData->bDataReady)
+    {
+        KSPLog("ERROR: Shared data not ready");
+        goto cleanup;
+    }
+    
+    // Check if already consumed
+    if (pData->bDataConsumed)
+    {
+        KSPLog("ERROR: Shared data already consumed");
+        goto cleanup;
+    }
+    
+    KSPLog("Found shared data for user: %S", pData->wszUsername);
+    KSPLog("Certificate size: %d, Private key size: %d", pData->cbCertificate, pData->cbPrivateKey);
+    
+    // Allocate key structure
+    pKey = (PAUTHENTIK_KEY)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(AUTHENTIK_KEY));
+    if (pKey == NULL)
+    {
+        KSPLog("ERROR: Failed to allocate key structure");
+        goto cleanup;
+    }
+    
+    // Initialize key
+    pKey->dwMagic = AUTHENTIK_KEY_MAGIC;
+    wcscpy_s(pKey->wszUsername, MAX_USERNAME_SIZE, pData->wszUsername);
+    _snwprintf_s(pKey->wszKeyName, 256, _TRUNCATE, L"%s%s", AUTHENTIK_KEY_PREFIX, pData->wszUsername);
+    pKey->dwKeySpec = pData->dwKeySpec;
+    pKey->bFromSharedMemory = TRUE;
+    
+    // Copy certificate
+    if (pData->cbCertificate > 0 && pData->cbCertificate <= MAX_CERTIFICATE_SIZE)
+    {
         pKey->cbCertificate = pData->cbCertificate;
         pKey->pbCertificate = (PBYTE)HeapAlloc(GetProcessHeap(), 0, pData->cbCertificate);
-        if (!pKey->pbCertificate) {
+        if (pKey->pbCertificate == NULL)
+        {
             KSPLog("ERROR: Failed to allocate certificate buffer");
-            delete pKey;
-            pKey = nullptr;
-            __leave;
+            goto cleanup_key;
         }
         CopyMemory(pKey->pbCertificate, pData->rgbCertificate, pData->cbCertificate);
-        
-        // Copy private key blob
+        KSPLog("Copied certificate: %d bytes", pKey->cbCertificate);
+    }
+    
+    // Copy and import private key
+    if (pData->cbPrivateKey > 0 && pData->cbPrivateKey <= MAX_PRIVATE_KEY_SIZE)
+    {
         pKey->cbPrivateKeyBlob = pData->cbPrivateKey;
         pKey->pbPrivateKeyBlob = (PBYTE)HeapAlloc(GetProcessHeap(), 0, pData->cbPrivateKey);
-        if (!pKey->pbPrivateKeyBlob) {
+        if (pKey->pbPrivateKeyBlob == NULL)
+        {
             KSPLog("ERROR: Failed to allocate private key buffer");
-            HeapFree(GetProcessHeap(), 0, pKey->pbCertificate);
-            delete pKey;
-            pKey = nullptr;
-            __leave;
+            goto cleanup_key;
         }
         CopyMemory(pKey->pbPrivateKeyBlob, pData->rgbPrivateKey, pData->cbPrivateKey);
+        KSPLog("Copied private key blob: %d bytes", pKey->cbPrivateKeyBlob);
         
-        // Import private key into BCrypt
-        if (g_hRsaAlg == nullptr) {
-            NTSTATUS status = BCryptOpenAlgorithmProvider(&g_hRsaAlg, BCRYPT_RSA_ALGORITHM, nullptr, 0);
-            if (!NT_SUCCESS(status)) {
+        // Open RSA algorithm provider if needed
+        if (g_hRsaAlg == NULL)
+        {
+            NTSTATUS status = BCryptOpenAlgorithmProvider(&g_hRsaAlg, BCRYPT_RSA_ALGORITHM, NULL, 0);
+            if (!NT_SUCCESS(status))
+            {
                 KSPLog("ERROR: BCryptOpenAlgorithmProvider failed: 0x%08X", status);
-                HeapFree(GetProcessHeap(), 0, pKey->pbCertificate);
-                HeapFree(GetProcessHeap(), 0, pKey->pbPrivateKeyBlob);
-                delete pKey;
-                pKey = nullptr;
-                __leave;
+                goto cleanup_key;
             }
         }
         
+        // Import the key
         NTSTATUS status = BCryptImportKeyPair(
             g_hRsaAlg,
-            nullptr,
+            NULL,
             BCRYPT_RSAFULLPRIVATE_BLOB,
             &pKey->hBcryptKey,
             pKey->pbPrivateKeyBlob,
             pKey->cbPrivateKeyBlob,
             0);
         
-        if (!NT_SUCCESS(status)) {
-            KSPLog("ERROR: BCryptImportKeyPair failed: 0x%08X", status);
-            HeapFree(GetProcessHeap(), 0, pKey->pbCertificate);
-            HeapFree(GetProcessHeap(), 0, pKey->pbPrivateKeyBlob);
-            delete pKey;
-            pKey = nullptr;
-            __leave;
-        }
-        
-        // Mark data as consumed
-        pData->bDataConsumed = TRUE;
-        pData->bDataReady = FALSE;
-        
-        // Add to key store
+        if (!NT_SUCCESS(status))
         {
-            std::lock_guard<std::mutex> lock(g_keyStoreMutex);
-            g_keyStore[pKey->wszKeyName] = pKey;
+            KSPLog("ERROR: BCryptImportKeyPair failed: 0x%08X", status);
+            goto cleanup_key;
         }
         
-        KSPLog("Key created successfully: %S", pKey->wszKeyName.c_str());
+        KSPLog("Successfully imported BCrypt key");
     }
-    __finally {
+    
+    // Mark data as consumed
+    pData->bDataConsumed = TRUE;
+    
+    // Store as current key
+    EnterCriticalSection(&g_csKeyStore);
+    if (g_pCurrentKey != NULL)
+    {
+        CleanupKey(g_pCurrentKey);
+    }
+    g_pCurrentKey = pKey;
+    LeaveCriticalSection(&g_csKeyStore);
+    
+    KSPLog("Key created successfully: %S", pKey->wszKeyName);
+    
+    if (pProvider->hMutex)
         ReleaseMutex(pProvider->hMutex);
-    }
     
     return pKey;
+
+cleanup_key:
+    CleanupKey(pKey);
+    pKey = NULL;
+    
+cleanup:
+    if (pProvider->hMutex)
+        ReleaseMutex(pProvider->hMutex);
+    
+    return NULL;
 }
 
-// Cleanup key
-void CleanupKey(PAUTHENTIK_KEY pKey)
-{
-    if (!pKey) return;
-    
-    KSPLog("CleanupKey: %S", pKey->wszKeyName.c_str());
-    
-    if (pKey->hBcryptKey) {
-        BCryptDestroyKey(pKey->hBcryptKey);
-        pKey->hBcryptKey = nullptr;
-    }
-    
-    if (pKey->pbCertificate) {
-        SecureZeroMemory(pKey->pbCertificate, pKey->cbCertificate);
-        HeapFree(GetProcessHeap(), 0, pKey->pbCertificate);
-        pKey->pbCertificate = nullptr;
-    }
-    
-    if (pKey->pbPrivateKeyBlob) {
-        SecureZeroMemory(pKey->pbPrivateKeyBlob, pKey->cbPrivateKeyBlob);
-        HeapFree(GetProcessHeap(), 0, pKey->pbPrivateKeyBlob);
-        pKey->pbPrivateKeyBlob = nullptr;
-    }
-    
-    pKey->dwMagic = 0;
-    delete pKey;
-}
-
-//=============================================================================
-// Provider Functions
-//=============================================================================
+//
+// KSP Implementation
+//
 
 SECURITY_STATUS WINAPI KSPOpenProvider(
-    __out   NCRYPT_PROV_HANDLE *phProvider,
-    __in    LPCWSTR pszProviderName,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE *phProvider,
+    LPCWSTR pszProviderName,
+    DWORD dwFlags)
 {
-    KSPLog("KSPOpenProvider: %S, flags=0x%08X", pszProviderName ? pszProviderName : L"(null)", dwFlags);
+    KSPLog("KSPOpenProvider: %S", pszProviderName ? pszProviderName : L"(null)");
     
-    if (!phProvider) {
+    InitializeGlobals();
+    
+    if (phProvider == NULL)
         return NTE_INVALID_PARAMETER;
-    }
     
     *phProvider = 0;
     
     // Allocate provider structure
-    PAUTHENTIK_PROVIDER pProvider = new AUTHENTIK_PROVIDER();
-    ZeroMemory(pProvider, sizeof(AUTHENTIK_PROVIDER));
+    PAUTHENTIK_PROVIDER pProvider = (PAUTHENTIK_PROVIDER)HeapAlloc(
+        GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(AUTHENTIK_PROVIDER));
+    
+    if (pProvider == NULL)
+    {
+        KSPLog("ERROR: Failed to allocate provider");
+        return NTE_NO_MEMORY;
+    }
+    
     pProvider->dwMagic = AUTHENTIK_PROVIDER_MAGIC;
     
-    // Open shared memory (created by credential provider)
-    pProvider->hSharedMemory = OpenFileMappingW(
-        FILE_MAP_ALL_ACCESS,
-        FALSE,
-        AUTHENTIK_SHARED_MEMORY_NAME);
-    
-    if (pProvider->hSharedMemory) {
-        pProvider->pSharedData = (PAUTHENTIK_SHARED_DATA)MapViewOfFile(
-            pProvider->hSharedMemory,
-            FILE_MAP_ALL_ACCESS,
-            0, 0,
-            sizeof(AUTHENTIK_SHARED_DATA));
-        
-        if (!pProvider->pSharedData) {
-            KSPLog("WARNING: Failed to map shared memory: %d", GetLastError());
-            CloseHandle(pProvider->hSharedMemory);
-            pProvider->hSharedMemory = nullptr;
-        }
-    } else {
-        KSPLog("WARNING: Shared memory not available (credential provider may not have created it yet)");
-    }
-    
-    // Open mutex
+    // Try to open shared memory
     pProvider->hMutex = OpenMutexW(SYNCHRONIZE, FALSE, AUTHENTIK_MUTEX_NAME);
-    if (!pProvider->hMutex) {
-        KSPLog("WARNING: Mutex not available: %d", GetLastError());
+    if (pProvider->hMutex)
+    {
+        KSPLog("Opened mutex");
+        
+        pProvider->hSharedMemory = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, AUTHENTIK_SHARED_MEMORY_NAME);
+        if (pProvider->hSharedMemory)
+        {
+            pProvider->pSharedData = (PAUTHENTIK_SHARED_DATA)MapViewOfFile(
+                pProvider->hSharedMemory,
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                0, 0,
+                sizeof(AUTHENTIK_SHARED_DATA));
+            
+            if (pProvider->pSharedData)
+            {
+                KSPLog("Mapped shared memory successfully");
+            }
+            else
+            {
+                KSPLog("WARNING: Failed to map shared memory: %d", GetLastError());
+            }
+        }
+        else
+        {
+            KSPLog("WARNING: Failed to open shared memory: %d", GetLastError());
+        }
     }
-    
-    *phProvider = (NCRYPT_PROV_HANDLE)pProvider;
+    else
+    {
+        KSPLog("WARNING: Failed to open mutex: %d (credential provider may not be running)", GetLastError());
+    }
     
     DllAddRef();
-    KSPLog("Provider opened: 0x%p", pProvider);
+    *phProvider = (NCRYPT_PROV_HANDLE)pProvider;
     
+    KSPLog("Provider opened: 0x%p", pProvider);
     return ERROR_SUCCESS;
 }
 
-SECURITY_STATUS WINAPI KSPFreeProvider(
-    __in    NCRYPT_PROV_HANDLE hProvider)
+SECURITY_STATUS WINAPI KSPFreeProvider(NCRYPT_PROV_HANDLE hProvider)
 {
     KSPLog("KSPFreeProvider: 0x%p", (void*)hProvider);
     
-    if (!ValidateProviderHandle(hProvider)) {
+    if (!ValidateProviderHandle(hProvider))
         return NTE_INVALID_HANDLE;
-    }
     
     PAUTHENTIK_PROVIDER pProvider = (PAUTHENTIK_PROVIDER)hProvider;
     
-    if (pProvider->pSharedData) {
+    if (pProvider->pSharedData)
+    {
         UnmapViewOfFile(pProvider->pSharedData);
-        pProvider->pSharedData = nullptr;
+        pProvider->pSharedData = NULL;
     }
     
-    if (pProvider->hSharedMemory) {
+    if (pProvider->hSharedMemory)
+    {
         CloseHandle(pProvider->hSharedMemory);
-        pProvider->hSharedMemory = nullptr;
+        pProvider->hSharedMemory = NULL;
     }
     
-    if (pProvider->hMutex) {
+    if (pProvider->hMutex)
+    {
         CloseHandle(pProvider->hMutex);
-        pProvider->hMutex = nullptr;
+        pProvider->hMutex = NULL;
     }
     
-    pProvider->dwMagic = 0;
-    delete pProvider;
+    SecureZeroMemory(pProvider, sizeof(AUTHENTIK_PROVIDER));
+    HeapFree(GetProcessHeap(), 0, pProvider);
     
     DllRelease();
-    
     return ERROR_SUCCESS;
 }
 
-//=============================================================================
-// Key Functions
-//=============================================================================
-
 SECURITY_STATUS WINAPI KSPOpenKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __out   NCRYPT_KEY_HANDLE *phKey,
-    __in    LPCWSTR pszKeyName,
-    __in    DWORD dwLegacyKeySpec,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE *phKey,
+    LPCWSTR pszKeyName,
+    DWORD dwLegacyKeySpec,
+    DWORD dwFlags)
 {
-    KSPLog("KSPOpenKey: %S, spec=%d, flags=0x%08X", 
-           pszKeyName ? pszKeyName : L"(null)", dwLegacyKeySpec, dwFlags);
+    KSPLog("KSPOpenKey: %S, KeySpec: %d", pszKeyName ? pszKeyName : L"(null)", dwLegacyKeySpec);
     
-    if (!ValidateProviderHandle(hProvider) || !phKey) {
+    if (!ValidateProviderHandle(hProvider))
+        return NTE_INVALID_HANDLE;
+    
+    if (phKey == NULL)
         return NTE_INVALID_PARAMETER;
-    }
     
     *phKey = 0;
     
     PAUTHENTIK_PROVIDER pProvider = (PAUTHENTIK_PROVIDER)hProvider;
-    PAUTHENTIK_KEY pKey = nullptr;
     
-    // First check if key exists in our store
-    if (pszKeyName) {
-        std::lock_guard<std::mutex> lock(g_keyStoreMutex);
-        auto it = g_keyStore.find(pszKeyName);
-        if (it != g_keyStore.end()) {
-            pKey = it->second;
-            KSPLog("Found key in store: %S", pszKeyName);
+    // Try to get key from shared memory
+    PAUTHENTIK_KEY pKey = CreateKeyFromSharedMemory(pProvider);
+    
+    if (pKey == NULL)
+    {
+        // Check if we have a cached key
+        EnterCriticalSection(&g_csKeyStore);
+        if (g_pCurrentKey != NULL)
+        {
+            // Return the cached key (add ref by creating a copy or just return it)
+            pKey = g_pCurrentKey;
+            KSPLog("Using cached key: %S", pKey->wszKeyName);
         }
+        LeaveCriticalSection(&g_csKeyStore);
     }
     
-    // If not found, try to create from shared memory
-    if (!pKey && pProvider->pSharedData) {
-        pKey = CreateKeyFromSharedMemory(pProvider);
-    }
-    
-    if (!pKey) {
-        KSPLog("Key not found: %S", pszKeyName ? pszKeyName : L"(null)");
+    if (pKey == NULL)
+    {
+        KSPLog("ERROR: No key available");
         return NTE_BAD_KEYSET;
     }
     
@@ -407,299 +457,304 @@ SECURITY_STATUS WINAPI KSPOpenKey(
 }
 
 SECURITY_STATUS WINAPI KSPCreatePersistedKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __out   NCRYPT_KEY_HANDLE *phKey,
-    __in    LPCWSTR pszAlgId,
-    __in_opt LPCWSTR pszKeyName,
-    __in    DWORD dwLegacyKeySpec,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE *phKey,
+    LPCWSTR pszAlgId,
+    LPCWSTR pszKeyName,
+    DWORD dwLegacyKeySpec,
+    DWORD dwFlags)
 {
-    KSPLog("KSPCreatePersistedKey: alg=%S, name=%S", 
-           pszAlgId ? pszAlgId : L"(null)",
-           pszKeyName ? pszKeyName : L"(null)");
-    
-    // We don't support creating new keys - only importing
+    KSPLog("KSPCreatePersistedKey: %S (not implemented)", pszKeyName ? pszKeyName : L"(null)");
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPFinalizeKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    DWORD dwFlags)
 {
     KSPLog("KSPFinalizeKey");
-    
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey)) {
-        return NTE_INVALID_HANDLE;
-    }
-    
     return ERROR_SUCCESS;
 }
 
 SECURITY_STATUS WINAPI KSPDeleteKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    DWORD dwFlags)
 {
     KSPLog("KSPDeleteKey");
     
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey)) {
+    if (!ValidateKeyHandle(hKey))
         return NTE_INVALID_HANDLE;
-    }
     
-    PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
-    
-    // Remove from store
-    {
-        std::lock_guard<std::mutex> lock(g_keyStoreMutex);
-        g_keyStore.erase(pKey->wszKeyName);
-    }
-    
-    CleanupKey(pKey);
-    
+    // Don't actually delete, just return success
     return ERROR_SUCCESS;
 }
 
 SECURITY_STATUS WINAPI KSPFreeKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey)
 {
     KSPLog("KSPFreeKey: 0x%p", (void*)hKey);
     
-    // Don't actually free the key - it stays in our store
-    // Just validate handles
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey)) {
-        return NTE_INVALID_HANDLE;
-    }
-    
+    // Don't free the cached key
+    // Just return success
     return ERROR_SUCCESS;
 }
 
-//=============================================================================
-// Property Functions
-//=============================================================================
-
 SECURITY_STATUS WINAPI KSPGetProviderProperty(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    LPCWSTR pszProperty,
-    __out_bcount_part_opt(cbOutput, *pcbResult) PBYTE pbOutput,
-    __in    DWORD cbOutput,
-    __out   DWORD *pcbResult,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    LPCWSTR pszProperty,
+    PBYTE pbOutput,
+    DWORD cbOutput,
+    DWORD *pcbResult,
+    DWORD dwFlags)
 {
     KSPLog("KSPGetProviderProperty: %S", pszProperty ? pszProperty : L"(null)");
     
-    if (!ValidateProviderHandle(hProvider) || !pszProperty || !pcbResult) {
+    if (!ValidateProviderHandle(hProvider))
+        return NTE_INVALID_HANDLE;
+    
+    if (pszProperty == NULL || pcbResult == NULL)
         return NTE_INVALID_PARAMETER;
-    }
     
-    *pcbResult = 0;
-    
-    if (wcscmp(pszProperty, NCRYPT_NAME_PROPERTY) == 0) {
+    // Handle known properties
+    if (wcscmp(pszProperty, NCRYPT_NAME_PROPERTY) == 0)
+    {
         DWORD cbName = (DWORD)((wcslen(AUTHENTIK_KSP_NAME) + 1) * sizeof(WCHAR));
         *pcbResult = cbName;
         
-        if (pbOutput) {
-            if (cbOutput < cbName) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
-            CopyMemory(pbOutput, AUTHENTIK_KSP_NAME, cbName);
-        }
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
+        
+        if (cbOutput < cbName)
+            return NTE_BUFFER_TOO_SMALL;
+        
+        wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), AUTHENTIK_KSP_NAME);
         return ERROR_SUCCESS;
     }
     
-    if (wcscmp(pszProperty, NCRYPT_IMPL_TYPE_PROPERTY) == 0) {
+    if (wcscmp(pszProperty, NCRYPT_IMPL_TYPE_PROPERTY) == 0)
+    {
         *pcbResult = sizeof(DWORD);
-        if (pbOutput) {
-            if (cbOutput < sizeof(DWORD)) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
-            *(DWORD*)pbOutput = NCRYPT_IMPL_SOFTWARE_FLAG;
-        }
+        
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
+        
+        if (cbOutput < sizeof(DWORD))
+            return NTE_BUFFER_TOO_SMALL;
+        
+        *(DWORD*)pbOutput = NCRYPT_IMPL_SOFTWARE_FLAG;
         return ERROR_SUCCESS;
     }
     
+    KSPLog("Unknown property: %S", pszProperty);
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPGetKeyProperty(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in    LPCWSTR pszProperty,
-    __out_bcount_part_opt(cbOutput, *pcbResult) PBYTE pbOutput,
-    __in    DWORD cbOutput,
-    __out   DWORD *pcbResult,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    LPCWSTR pszProperty,
+    PBYTE pbOutput,
+    DWORD cbOutput,
+    DWORD *pcbResult,
+    DWORD dwFlags)
 {
     KSPLog("KSPGetKeyProperty: %S", pszProperty ? pszProperty : L"(null)");
     
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey) || 
-        !pszProperty || !pcbResult) {
+    if (!ValidateKeyHandle(hKey))
+        return NTE_INVALID_HANDLE;
+    
+    if (pszProperty == NULL || pcbResult == NULL)
         return NTE_INVALID_PARAMETER;
-    }
     
     PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
-    *pcbResult = 0;
     
-    // Certificate property - CRITICAL for PKINIT!
-    if (wcscmp(pszProperty, NCRYPT_CERTIFICATE_PROPERTY) == 0) {
-        KSPLog("Returning certificate, size=%d", pKey->cbCertificate);
+    // Certificate property - critical for PKINIT
+    if (wcscmp(pszProperty, NCRYPT_CERTIFICATE_PROPERTY) == 0)
+    {
+        KSPLog("Returning certificate: %d bytes", pKey->cbCertificate);
+        
         *pcbResult = pKey->cbCertificate;
         
-        if (pbOutput) {
-            if (cbOutput < pKey->cbCertificate) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
+        
+        if (cbOutput < pKey->cbCertificate)
+            return NTE_BUFFER_TOO_SMALL;
+        
+        if (pKey->pbCertificate)
+        {
             CopyMemory(pbOutput, pKey->pbCertificate, pKey->cbCertificate);
         }
         return ERROR_SUCCESS;
     }
     
     // Key name
-    if (wcscmp(pszProperty, NCRYPT_NAME_PROPERTY) == 0) {
-        DWORD cbName = (DWORD)((pKey->wszKeyName.length() + 1) * sizeof(WCHAR));
+    if (wcscmp(pszProperty, NCRYPT_NAME_PROPERTY) == 0)
+    {
+        DWORD cbName = (DWORD)((wcslen(pKey->wszKeyName) + 1) * sizeof(WCHAR));
         *pcbResult = cbName;
         
-        if (pbOutput) {
-            if (cbOutput < cbName) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
-            CopyMemory(pbOutput, pKey->wszKeyName.c_str(), cbName);
-        }
-        return ERROR_SUCCESS;
-    }
-    
-    // Key type
-    if (wcscmp(pszProperty, NCRYPT_ALGORITHM_PROPERTY) == 0) {
-        DWORD cbAlg = (DWORD)((wcslen(BCRYPT_RSA_ALGORITHM) + 1) * sizeof(WCHAR));
-        *pcbResult = cbAlg;
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
         
-        if (pbOutput) {
-            if (cbOutput < cbAlg) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
-            CopyMemory(pbOutput, BCRYPT_RSA_ALGORITHM, cbAlg);
-        }
+        if (cbOutput < cbName)
+            return NTE_BUFFER_TOO_SMALL;
+        
+        wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), pKey->wszKeyName);
         return ERROR_SUCCESS;
     }
     
     // Key length
-    if (wcscmp(pszProperty, NCRYPT_LENGTH_PROPERTY) == 0) {
+    if (wcscmp(pszProperty, NCRYPT_LENGTH_PROPERTY) == 0)
+    {
         *pcbResult = sizeof(DWORD);
         
-        if (pbOutput) {
-            if (cbOutput < sizeof(DWORD)) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
-            // Get key length from BCrypt
-            DWORD dwKeyLength = 0;
-            ULONG cbResult = 0;
-            if (pKey->hBcryptKey) {
-                BCryptGetProperty(pKey->hBcryptKey, BCRYPT_KEY_LENGTH, 
-                                  (PUCHAR)&dwKeyLength, sizeof(dwKeyLength), &cbResult, 0);
-            }
-            *(DWORD*)pbOutput = dwKeyLength ? dwKeyLength : 2048;
-        }
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
+        
+        if (cbOutput < sizeof(DWORD))
+            return NTE_BUFFER_TOO_SMALL;
+        
+        *(DWORD*)pbOutput = 2048;  // Assume 2048-bit key
         return ERROR_SUCCESS;
     }
     
-    // Export policy
-    if (wcscmp(pszProperty, NCRYPT_EXPORT_POLICY_PROPERTY) == 0) {
-        *pcbResult = sizeof(DWORD);
+    // Algorithm name
+    if (wcscmp(pszProperty, NCRYPT_ALGORITHM_PROPERTY) == 0)
+    {
+        LPCWSTR pszAlg = BCRYPT_RSA_ALGORITHM;
+        DWORD cbAlg = (DWORD)((wcslen(pszAlg) + 1) * sizeof(WCHAR));
+        *pcbResult = cbAlg;
         
-        if (pbOutput) {
-            if (cbOutput < sizeof(DWORD)) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
-            *(DWORD*)pbOutput = 0; // Not exportable
-        }
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
+        
+        if (cbOutput < cbAlg)
+            return NTE_BUFFER_TOO_SMALL;
+        
+        wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), pszAlg);
         return ERROR_SUCCESS;
     }
     
     // Key usage
-    if (wcscmp(pszProperty, NCRYPT_KEY_USAGE_PROPERTY) == 0) {
+    if (wcscmp(pszProperty, NCRYPT_KEY_USAGE_PROPERTY) == 0)
+    {
         *pcbResult = sizeof(DWORD);
         
-        if (pbOutput) {
-            if (cbOutput < sizeof(DWORD)) {
-                return NTE_BUFFER_TOO_SMALL;
-            }
-            *(DWORD*)pbOutput = NCRYPT_ALLOW_SIGNING_FLAG | NCRYPT_ALLOW_DECRYPT_FLAG;
-        }
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
+        
+        if (cbOutput < sizeof(DWORD))
+            return NTE_BUFFER_TOO_SMALL;
+        
+        *(DWORD*)pbOutput = NCRYPT_ALLOW_SIGNING_FLAG | NCRYPT_ALLOW_DECRYPT_FLAG;
         return ERROR_SUCCESS;
     }
     
-    KSPLog("Property not supported: %S", pszProperty);
+    // Export policy
+    if (wcscmp(pszProperty, NCRYPT_EXPORT_POLICY_PROPERTY) == 0)
+    {
+        *pcbResult = sizeof(DWORD);
+        
+        if (pbOutput == NULL)
+            return ERROR_SUCCESS;
+        
+        if (cbOutput < sizeof(DWORD))
+            return NTE_BUFFER_TOO_SMALL;
+        
+        *(DWORD*)pbOutput = 0;  // No export allowed
+        return ERROR_SUCCESS;
+    }
+    
+    KSPLog("Unknown key property: %S", pszProperty);
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPSetProviderProperty(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    LPCWSTR pszProperty,
-    __in_bcount(cbInput) PBYTE pbInput,
-    __in    DWORD cbInput,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    LPCWSTR pszProperty,
+    PBYTE pbInput,
+    DWORD cbInput,
+    DWORD dwFlags)
 {
     KSPLog("KSPSetProviderProperty: %S", pszProperty ? pszProperty : L"(null)");
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPSetKeyProperty(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in    LPCWSTR pszProperty,
-    __in_bcount(cbInput) PBYTE pbInput,
-    __in    DWORD cbInput,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    LPCWSTR pszProperty,
+    PBYTE pbInput,
+    DWORD cbInput,
+    DWORD dwFlags)
 {
     KSPLog("KSPSetKeyProperty: %S", pszProperty ? pszProperty : L"(null)");
-    
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey)) {
-        return NTE_INVALID_HANDLE;
-    }
-    
-    // Accept but ignore most property sets
-    return ERROR_SUCCESS;
+    return NTE_NOT_SUPPORTED;
 }
 
-//=============================================================================
-// Cryptographic Operations
-//=============================================================================
+SECURITY_STATUS WINAPI KSPEncrypt(
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    PBYTE pbInput,
+    DWORD cbInput,
+    VOID *pPaddingInfo,
+    PBYTE pbOutput,
+    DWORD cbOutput,
+    DWORD *pcbResult,
+    DWORD dwFlags)
+{
+    KSPLog("KSPEncrypt");
+    return NTE_NOT_SUPPORTED;
+}
+
+SECURITY_STATUS WINAPI KSPDecrypt(
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    PBYTE pbInput,
+    DWORD cbInput,
+    VOID *pPaddingInfo,
+    PBYTE pbOutput,
+    DWORD cbOutput,
+    DWORD *pcbResult,
+    DWORD dwFlags)
+{
+    KSPLog("KSPDecrypt");
+    return NTE_NOT_SUPPORTED;
+}
 
 SECURITY_STATUS WINAPI KSPSignHash(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in    VOID *pPaddingInfo,
-    __in_bcount(cbHashValue) PBYTE pbHashValue,
-    __in    DWORD cbHashValue,
-    __out_bcount_part_opt(cbSignature, *pcbResult) PBYTE pbSignature,
-    __in    DWORD cbSignature,
-    __out   DWORD *pcbResult,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    VOID *pPaddingInfo,
+    PBYTE pbHashValue,
+    DWORD cbHashValue,
+    PBYTE pbSignature,
+    DWORD cbSignature,
+    DWORD *pcbResult,
+    DWORD dwFlags)
 {
-    KSPLog("KSPSignHash: hashSize=%d, sigSize=%d, flags=0x%08X", cbHashValue, cbSignature, dwFlags);
+    KSPLog("KSPSignHash: HashSize=%d, SigBufSize=%d, Flags=0x%08X", cbHashValue, cbSignature, dwFlags);
     
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey) || !pcbResult) {
+    if (!ValidateKeyHandle(hKey))
+        return NTE_INVALID_HANDLE;
+    
+    if (pbHashValue == NULL || pcbResult == NULL)
         return NTE_INVALID_PARAMETER;
-    }
     
     PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
     
-    if (!pKey->hBcryptKey) {
-        KSPLog("ERROR: No BCrypt key available");
-        return NTE_INVALID_HANDLE;
+    if (pKey->hBcryptKey == NULL)
+    {
+        KSPLog("ERROR: No BCrypt key handle");
+        return NTE_BAD_KEY;
     }
     
-    // Determine padding
-    LPCWSTR pwszPaddingAlg = nullptr;
-    if (dwFlags & BCRYPT_PAD_PKCS1) {
-        if (pPaddingInfo) {
-            BCRYPT_PKCS1_PADDING_INFO* pPkcs1 = (BCRYPT_PKCS1_PADDING_INFO*)pPaddingInfo;
-            pwszPaddingAlg = pPkcs1->pszAlgId;
-        }
-    }
-    
-    // Sign using BCrypt
+    // Use BCrypt to sign
+    ULONG cbResult = 0;
     NTSTATUS status = BCryptSignHash(
         pKey->hBcryptKey,
         pPaddingInfo,
@@ -707,357 +762,237 @@ SECURITY_STATUS WINAPI KSPSignHash(
         cbHashValue,
         pbSignature,
         cbSignature,
-        (ULONG*)pcbResult,
+        &cbResult,
         dwFlags);
     
-    if (!NT_SUCCESS(status)) {
-        KSPLog("BCryptSignHash failed: 0x%08X", status);
+    *pcbResult = cbResult;
+    
+    if (!NT_SUCCESS(status))
+    {
+        KSPLog("ERROR: BCryptSignHash failed: 0x%08X", status);
         return NTE_INTERNAL_ERROR;
     }
     
-    KSPLog("Signature created, size=%d", *pcbResult);
+    KSPLog("Signature created: %d bytes", cbResult);
     return ERROR_SUCCESS;
 }
 
 SECURITY_STATUS WINAPI KSPVerifySignature(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in    VOID *pPaddingInfo,
-    __in_bcount(cbHashValue) PBYTE pbHashValue,
-    __in    DWORD cbHashValue,
-    __in_bcount(cbSignature) PBYTE pbSignature,
-    __in    DWORD cbSignature,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    VOID *pPaddingInfo,
+    PBYTE pbHashValue,
+    DWORD cbHashValue,
+    PBYTE pbSignature,
+    DWORD cbSignature,
+    DWORD dwFlags)
 {
     KSPLog("KSPVerifySignature");
-    
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey)) {
-        return NTE_INVALID_HANDLE;
-    }
-    
-    PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
-    
-    if (!pKey->hBcryptKey) {
-        return NTE_INVALID_HANDLE;
-    }
-    
-    NTSTATUS status = BCryptVerifySignature(
-        pKey->hBcryptKey,
-        pPaddingInfo,
-        pbHashValue,
-        cbHashValue,
-        pbSignature,
-        cbSignature,
-        dwFlags);
-    
-    return NT_SUCCESS(status) ? ERROR_SUCCESS : NTE_BAD_SIGNATURE;
+    return NTE_NOT_SUPPORTED;
 }
-
-SECURITY_STATUS WINAPI KSPEncrypt(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in_bcount(cbInput) PBYTE pbInput,
-    __in    DWORD cbInput,
-    __in    VOID *pPaddingInfo,
-    __out_bcount_part_opt(cbOutput, *pcbResult) PBYTE pbOutput,
-    __in    DWORD cbOutput,
-    __out   DWORD *pcbResult,
-    __in    DWORD dwFlags)
-{
-    KSPLog("KSPEncrypt");
-    
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey) || !pcbResult) {
-        return NTE_INVALID_PARAMETER;
-    }
-    
-    PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
-    
-    if (!pKey->hBcryptKey) {
-        return NTE_INVALID_HANDLE;
-    }
-    
-    NTSTATUS status = BCryptEncrypt(
-        pKey->hBcryptKey,
-        pbInput,
-        cbInput,
-        pPaddingInfo,
-        nullptr, 0,
-        pbOutput,
-        cbOutput,
-        (ULONG*)pcbResult,
-        dwFlags);
-    
-    return NT_SUCCESS(status) ? ERROR_SUCCESS : NTE_INTERNAL_ERROR;
-}
-
-SECURITY_STATUS WINAPI KSPDecrypt(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in_bcount(cbInput) PBYTE pbInput,
-    __in    DWORD cbInput,
-    __in    VOID *pPaddingInfo,
-    __out_bcount_part_opt(cbOutput, *pcbResult) PBYTE pbOutput,
-    __in    DWORD cbOutput,
-    __out   DWORD *pcbResult,
-    __in    DWORD dwFlags)
-{
-    KSPLog("KSPDecrypt");
-    
-    if (!ValidateProviderHandle(hProvider) || !ValidateKeyHandle(hKey) || !pcbResult) {
-        return NTE_INVALID_PARAMETER;
-    }
-    
-    PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
-    
-    if (!pKey->hBcryptKey) {
-        return NTE_INVALID_HANDLE;
-    }
-    
-    NTSTATUS status = BCryptDecrypt(
-        pKey->hBcryptKey,
-        pbInput,
-        cbInput,
-        pPaddingInfo,
-        nullptr, 0,
-        pbOutput,
-        cbOutput,
-        (ULONG*)pcbResult,
-        dwFlags);
-    
-    return NT_SUCCESS(status) ? ERROR_SUCCESS : NTE_INTERNAL_ERROR;
-}
-
-//=============================================================================
-// Utility Functions
-//=============================================================================
 
 SECURITY_STATUS WINAPI KSPIsAlgSupported(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    LPCWSTR pszAlgId,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    LPCWSTR pszAlgId,
+    DWORD dwFlags)
 {
     KSPLog("KSPIsAlgSupported: %S", pszAlgId ? pszAlgId : L"(null)");
     
-    if (!pszAlgId) {
+    if (pszAlgId == NULL)
         return NTE_INVALID_PARAMETER;
-    }
     
-    if (wcscmp(pszAlgId, BCRYPT_RSA_ALGORITHM) == 0 ||
-        wcscmp(pszAlgId, NCRYPT_RSA_ALGORITHM) == 0) {
+    if (wcscmp(pszAlgId, BCRYPT_RSA_ALGORITHM) == 0)
         return ERROR_SUCCESS;
-    }
     
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPEnumAlgorithms(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    DWORD dwAlgOperations,
-    __out   DWORD *pdwAlgCount,
-    __out   NCryptAlgorithmName **ppAlgList,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    DWORD dwAlgOperations,
+    DWORD *pdwAlgCount,
+    NCryptAlgorithmName **ppAlgList,
+    DWORD dwFlags)
 {
     KSPLog("KSPEnumAlgorithms");
     
-    if (!pdwAlgCount || !ppAlgList) {
+    if (pdwAlgCount == NULL || ppAlgList == NULL)
         return NTE_INVALID_PARAMETER;
-    }
     
-    // Return RSA as the only supported algorithm
-    NCryptAlgorithmName* pAlg = (NCryptAlgorithmName*)HeapAlloc(
+    // Allocate algorithm list
+    NCryptAlgorithmName* pAlgList = (NCryptAlgorithmName*)HeapAlloc(
         GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(NCryptAlgorithmName));
     
-    if (!pAlg) {
+    if (pAlgList == NULL)
         return NTE_NO_MEMORY;
-    }
     
-    pAlg->pszName = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, sizeof(BCRYPT_RSA_ALGORITHM));
-    if (pAlg->pszName) {
-        wcscpy_s(pAlg->pszName, wcslen(BCRYPT_RSA_ALGORITHM) + 1, BCRYPT_RSA_ALGORITHM);
+    pAlgList->pszName = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, 16 * sizeof(WCHAR));
+    if (pAlgList->pszName)
+    {
+        wcscpy_s(pAlgList->pszName, 16, BCRYPT_RSA_ALGORITHM);
     }
-    pAlg->dwClass = NCRYPT_ASYMMETRIC_ENCRYPTION_INTERFACE;
-    pAlg->dwAlgOperations = NCRYPT_ASYMMETRIC_ENCRYPTION_OPERATION | 
-                           NCRYPT_SIGNATURE_OPERATION;
-    pAlg->dwFlags = 0;
+    pAlgList->dwClass = NCRYPT_ASYMMETRIC_ENCRYPTION_OPERATION;
+    pAlgList->dwAlgOperations = NCRYPT_ASYMMETRIC_ENCRYPTION_OPERATION | NCRYPT_SIGNATURE_OPERATION;
+    pAlgList->dwFlags = 0;
     
     *pdwAlgCount = 1;
-    *ppAlgList = pAlg;
+    *ppAlgList = pAlgList;
     
     return ERROR_SUCCESS;
 }
 
 SECURITY_STATUS WINAPI KSPEnumKeys(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in_opt LPCWSTR pszScope,
-    __out   NCryptKeyName **ppKeyName,
-    __inout PVOID *ppEnumState,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    LPCWSTR pszScope,
+    NCryptKeyName **ppKeyName,
+    PVOID *ppEnumState,
+    DWORD dwFlags)
 {
     KSPLog("KSPEnumKeys");
     
-    if (!ppKeyName) {
+    if (ppKeyName == NULL || ppEnumState == NULL)
         return NTE_INVALID_PARAMETER;
+    
+    // Check if this is first call
+    if (*ppEnumState == NULL)
+    {
+        // Check if we have a key
+        EnterCriticalSection(&g_csKeyStore);
+        PAUTHENTIK_KEY pKey = g_pCurrentKey;
+        LeaveCriticalSection(&g_csKeyStore);
+        
+        if (pKey != NULL)
+        {
+            NCryptKeyName* pKeyName = (NCryptKeyName*)HeapAlloc(
+                GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(NCryptKeyName));
+            
+            if (pKeyName == NULL)
+                return NTE_NO_MEMORY;
+            
+            DWORD cbName = (DWORD)((wcslen(pKey->wszKeyName) + 1) * sizeof(WCHAR));
+            pKeyName->pszName = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cbName);
+            if (pKeyName->pszName)
+            {
+                wcscpy_s(pKeyName->pszName, cbName / sizeof(WCHAR), pKey->wszKeyName);
+            }
+            pKeyName->pszAlgid = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, 16 * sizeof(WCHAR));
+            if (pKeyName->pszAlgid)
+            {
+                wcscpy_s(pKeyName->pszAlgid, 16, BCRYPT_RSA_ALGORITHM);
+            }
+            pKeyName->dwLegacyKeySpec = pKey->dwKeySpec;
+            pKeyName->dwFlags = 0;
+            
+            *ppKeyName = pKeyName;
+            *ppEnumState = (PVOID)1;  // Mark as enumerated
+            return ERROR_SUCCESS;
+        }
     }
     
-    // Get current enumeration index
-    DWORD dwIndex = 0;
-    if (ppEnumState && *ppEnumState) {
-        dwIndex = (DWORD)(UINT_PTR)*ppEnumState;
-    }
-    
-    // Get keys from store
-    std::lock_guard<std::mutex> lock(g_keyStoreMutex);
-    
-    if (dwIndex >= g_keyStore.size()) {
-        return NTE_NO_MORE_ITEMS;
-    }
-    
-    // Find key at index
-    auto it = g_keyStore.begin();
-    std::advance(it, dwIndex);
-    
-    PAUTHENTIK_KEY pKey = it->second;
-    
-    // Allocate key name structure
-    NCryptKeyName* pKeyName = (NCryptKeyName*)HeapAlloc(
-        GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(NCryptKeyName));
-    
-    if (!pKeyName) {
-        return NTE_NO_MEMORY;
-    }
-    
-    DWORD cbName = (DWORD)((pKey->wszKeyName.length() + 1) * sizeof(WCHAR));
-    pKeyName->pszName = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cbName);
-    if (pKeyName->pszName) {
-        wcscpy_s(pKeyName->pszName, pKey->wszKeyName.length() + 1, pKey->wszKeyName.c_str());
-    }
-    
-    DWORD cbAlg = (DWORD)((wcslen(BCRYPT_RSA_ALGORITHM) + 1) * sizeof(WCHAR));
-    pKeyName->pszAlgid = (LPWSTR)HeapAlloc(GetProcessHeap(), 0, cbAlg);
-    if (pKeyName->pszAlgid) {
-        wcscpy_s(pKeyName->pszAlgid, wcslen(BCRYPT_RSA_ALGORITHM) + 1, BCRYPT_RSA_ALGORITHM);
-    }
-    
-    pKeyName->dwLegacyKeySpec = pKey->dwKeySpec;
-    pKeyName->dwFlags = 0;
-    
-    *ppKeyName = pKeyName;
-    
-    // Update enumeration state
-    if (ppEnumState) {
-        *ppEnumState = (PVOID)(UINT_PTR)(dwIndex + 1);
-    }
-    
-    return ERROR_SUCCESS;
+    // No more keys
+    return NTE_NO_MORE_ITEMS;
 }
 
 SECURITY_STATUS WINAPI KSPImportKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in_opt NCRYPT_KEY_HANDLE hImportKey,
-    __in    LPCWSTR pszBlobType,
-    __in_opt NCryptBufferDesc *pParameterList,
-    __out   NCRYPT_KEY_HANDLE *phKey,
-    __in_bcount(cbData) PBYTE pbData,
-    __in    DWORD cbData,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hImportKey,
+    LPCWSTR pszBlobType,
+    NCryptBufferDesc *pParameterList,
+    NCRYPT_KEY_HANDLE *phKey,
+    PBYTE pbData,
+    DWORD cbData,
+    DWORD dwFlags)
 {
-    KSPLog("KSPImportKey: type=%S, size=%d", pszBlobType ? pszBlobType : L"(null)", cbData);
-    
-    // For now, we don't support direct import - keys come via shared memory
+    KSPLog("KSPImportKey: %S", pszBlobType ? pszBlobType : L"(null)");
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPExportKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hKey,
-    __in_opt NCRYPT_KEY_HANDLE hExportKey,
-    __in    LPCWSTR pszBlobType,
-    __in_opt NCryptBufferDesc *pParameterList,
-    __out_bcount_part_opt(cbOutput, *pcbResult) PBYTE pbOutput,
-    __in    DWORD cbOutput,
-    __out   DWORD *pcbResult,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hKey,
+    NCRYPT_KEY_HANDLE hExportKey,
+    LPCWSTR pszBlobType,
+    NCryptBufferDesc *pParameterList,
+    PBYTE pbOutput,
+    DWORD cbOutput,
+    DWORD *pcbResult,
+    DWORD dwFlags)
 {
-    KSPLog("KSPExportKey: type=%S", pszBlobType ? pszBlobType : L"(null)");
-    
-    // Don't allow exporting private keys
+    KSPLog("KSPExportKey: %S", pszBlobType ? pszBlobType : L"(null)");
     return NTE_NOT_SUPPORTED;
 }
 
-SECURITY_STATUS WINAPI KSPFreeBuffer(
-    __deref PVOID pvInput)
+SECURITY_STATUS WINAPI KSPFreeBuffer(PVOID pvInput)
 {
     KSPLog("KSPFreeBuffer: 0x%p", pvInput);
     
-    if (pvInput) {
+    if (pvInput)
+    {
         HeapFree(GetProcessHeap(), 0, pvInput);
     }
-    
     return ERROR_SUCCESS;
 }
 
 SECURITY_STATUS WINAPI KSPNotifyChangeKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __inout HANDLE *phEvent,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    HANDLE *phEvent,
+    DWORD dwFlags)
 {
     KSPLog("KSPNotifyChangeKey");
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPSecretAgreement(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_KEY_HANDLE hPrivKey,
-    __in    NCRYPT_KEY_HANDLE hPubKey,
-    __out   NCRYPT_SECRET_HANDLE *phSecret,
-    __in    DWORD dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_KEY_HANDLE hPrivKey,
+    NCRYPT_KEY_HANDLE hPubKey,
+    NCRYPT_SECRET_HANDLE *phSecret,
+    DWORD dwFlags)
 {
     KSPLog("KSPSecretAgreement");
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPDeriveKey(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in_opt NCRYPT_SECRET_HANDLE hSharedSecret,
-    __in    LPCWSTR pwszKDF,
-    __in_opt NCryptBufferDesc *pParameterList,
-    __out_bcount_part_opt(cbDerivedKey, *pcbResult) PBYTE pbDerivedKey,
-    __in    DWORD cbDerivedKey,
-    __out   DWORD *pcbResult,
-    __in    ULONG dwFlags)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_SECRET_HANDLE hSharedSecret,
+    LPCWSTR pwszKDF,
+    NCryptBufferDesc *pParameterList,
+    PBYTE pbDerivedKey,
+    DWORD cbDerivedKey,
+    DWORD *pcbResult,
+    ULONG dwFlags)
 {
     KSPLog("KSPDeriveKey");
     return NTE_NOT_SUPPORTED;
 }
 
 SECURITY_STATUS WINAPI KSPFreeSecret(
-    __in    NCRYPT_PROV_HANDLE hProvider,
-    __in    NCRYPT_SECRET_HANDLE hSharedSecret)
+    NCRYPT_PROV_HANDLE hProvider,
+    NCRYPT_SECRET_HANDLE hSharedSecret)
 {
     KSPLog("KSPFreeSecret");
     return NTE_NOT_SUPPORTED;
 }
 
-//=============================================================================
-// DLL Entry Point
-//=============================================================================
-
+// DLL entry point for function table
 NTSTATUS WINAPI GetKeyStorageInterface(
-    __in    LPCWSTR pszProviderName,
-    __out   NCRYPT_KEY_STORAGE_FUNCTION_TABLE **ppFunctionTable,
-    __in    DWORD dwFlags)
+    LPCWSTR pszProviderName,
+    AUTHENTIK_KSP_FUNCTION_TABLE **ppFunctionTable,
+    DWORD dwFlags)
 {
     KSPLog("GetKeyStorageInterface: %S", pszProviderName ? pszProviderName : L"(null)");
     
-    if (!ppFunctionTable) {
+    InitializeGlobals();
+    
+    if (ppFunctionTable == NULL)
         return STATUS_INVALID_PARAMETER;
-    }
     
     *ppFunctionTable = &g_FunctionTable;
-    
     return STATUS_SUCCESS;
 }
 
+// DLL Main
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
     switch (dwReason)
@@ -1071,22 +1006,25 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
     case DLL_PROCESS_DETACH:
         KSPLog("DLL_PROCESS_DETACH");
         
-        // Cleanup all keys
+        // Clean up
+        if (g_pCurrentKey)
         {
-            std::lock_guard<std::mutex> lock(g_keyStoreMutex);
-            for (auto& pair : g_keyStore) {
-                CleanupKey(pair.second);
-            }
-            g_keyStore.clear();
+            CleanupKey(g_pCurrentKey);
+            g_pCurrentKey = NULL;
         }
         
-        // Close BCrypt handle
-        if (g_hRsaAlg) {
+        if (g_hRsaAlg)
+        {
             BCryptCloseAlgorithmProvider(g_hRsaAlg, 0);
-            g_hRsaAlg = nullptr;
+            g_hRsaAlg = NULL;
+        }
+        
+        if (g_bInitialized)
+        {
+            DeleteCriticalSection(&g_csKeyStore);
+            g_bInitialized = FALSE;
         }
         break;
     }
-    
     return TRUE;
 }
