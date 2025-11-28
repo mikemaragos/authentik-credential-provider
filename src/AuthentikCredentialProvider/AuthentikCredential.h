@@ -17,8 +17,8 @@ class AuthentikAPI;
 // Authentication steps
 enum class AuthStep
 {
-    STEP_USERNAME_PASSWORD,
-    STEP_OTP
+    STEP_USERNAME_PASSWORD,  // Initial step - just username (passwordless)
+    STEP_OTP                 // OTP validation step
 };
 
 class CAuthentikCredential : public ICredentialProviderCredential
@@ -63,6 +63,7 @@ private:
     HRESULT _HandleUsernamePasswordStep(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
     HRESULT _HandleOTPStep(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
     HRESULT _PackCredentialsAndReturn(const std::wstring& username, const std::wstring& password, CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
+    std::wstring _GetPasswordFromRegistry(const std::wstring& username);
 
     LONG _cRef;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus;
@@ -73,7 +74,8 @@ private:
     
     // Authentication state
     AuthStep _currentStep;
-    std::wstring _cachedPassword;
+    std::wstring _cachedUsername;   // Cached username for OTP step
+    std::wstring _cachedPassword;   // Kept for compatibility
     std::wstring _transactionId;
     
     // API client
