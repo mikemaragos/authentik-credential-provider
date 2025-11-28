@@ -47,33 +47,49 @@ AuthentikResponse AuthentikAPI::InitiateAuthentication(const std::wstring& usern
     AuthentikResponse response;
     response.success = false;
     response.requiresOTP = false;
+    response.requiresPassword = false;
 
     // Build request URL
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
 
-    // Build JSON payload
-    std::wstring payload = L"{\"uid_field\":\"" + username + L"\"";
-    if (!password.empty())
-    {
-        payload += L",\"password\":\"" + password + L"\"";
-    }
-    payload += L"}";
+    // Step 1: Send username first (identification stage)
+    std::wstring payload = L"{\"uid_field\":\"" + username + L"\"}";
+    LOG("Step 1: Sending username");
 
-    // Make HTTP request
     std::wstring responseBody;
     HRESULT hr = _MakeHttpRequest(L"POST", url, payload, responseBody);
 
-    if (SUCCEEDED(hr))
+    if (FAILED(hr))
     {
-        // Parse response
-        response = _ParseAuthentikResponse(responseBody);
-        LOG("InitiateAuthentication response: success=%d, requiresOTP=%d", response.success, response.requiresOTP);
-    }
-    else
-    {
-        LOG("InitiateAuthentication failed: 0x%08x", hr);
+        LOG("InitiateAuthentication failed at Step 1: 0x%08x", hr);
         response.message = L"Failed to connect to authentication server";
+        return response;
     }
+
+    // Parse Step 1 response
+    response = _ParseAuthentikResponse(responseBody);
+
+    // If Authentik asks for password, send it in Step 2
+    if (response.requiresPassword && !password.empty())
+    {
+        LOG("Step 2: Sending password");
+        payload = L"{\"password\":\"" + password + L"\"}";
+        
+        hr = _MakeHttpRequest(L"POST", url, payload, responseBody);
+        
+        if (FAILED(hr))
+        {
+            LOG("InitiateAuthentication failed at Step 2: 0x%08x", hr);
+            response.message = L"Failed to send password";
+            return response;
+        }
+        
+        // Parse Step 2 response
+        response = _ParseAuthentikResponse(responseBody);
+    }
+
+    LOG("InitiateAuthentication final: success=%d, requiresOTP=%d, requiresPassword=%d", 
+        response.success, response.requiresOTP, response.requiresPassword);
 
     return response;
 }
@@ -86,6 +102,7 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
     AuthentikResponse response;
     response.success = false;
     response.requiresOTP = false;
+    response.requiresPassword = false;
 
     // Build request URL
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
@@ -443,16 +460,24 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
     AuthentikResponse response;
     response.success = false;
     response.requiresOTP = false;
+    response.requiresPassword = false;
 
-    // Simple JSON parsing (you may want to use a proper JSON library)
-    // For now, just check for key indicators
+    // Log a portion of the response for debugging
+    if (json.length() > 200)
+    {
+        LOG("Response (first 200 chars): %S...", json.substr(0, 200).c_str());
+    }
+    else
+    {
+        LOG("Response: %S", json.c_str());
+    }
 
     // Check for success (redirect type indicates success)
     if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos)
     {
         response.success = true;
         response.message = L"Authentication successful";
-        LOG("Parsed: Authentication successful");
+        LOG("Parsed: Authentication successful (redirect)");
     }
     // Check for OTP challenge
     else if (json.find(L"ak-stage-authenticator-validate") != std::wstring::npos)
@@ -464,19 +489,39 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
         size_t pos = json.find(L"\"flow_info\"");
         if (pos != std::wstring::npos)
         {
-            // In a real implementation, parse JSON properly
-            // For now, generate a simple transaction ID
             response.transactionId = L"tx_" + std::to_wstring(GetTickCount64());
         }
         
         LOG("Parsed: OTP required, transaction=%S", response.transactionId.c_str());
     }
-    // Check for error
-    else if (json.find(L"\"error\"") != std::wstring::npos)
+    // Check for password stage - need to send password separately
+    else if (json.find(L"ak-stage-password") != std::wstring::npos)
+    {
+        response.requiresPassword = true;
+        response.message = L"Password required";
+        LOG("Parsed: Password stage - need to send password");
+    }
+    // Check for identification stage - need to send username
+    else if (json.find(L"ak-stage-identification") != std::wstring::npos)
+    {
+        response.message = L"Identification required";
+        LOG("Parsed: Identification stage - need to send username");
+    }
+    // Check for error responses
+    else if (json.find(L"\"response_errors\"") != std::wstring::npos || 
+             json.find(L"\"error\"") != std::wstring::npos)
     {
         response.success = false;
         response.message = L"Authentication failed";
-        LOG("Parsed: Authentication failed");
+        LOG("Parsed: Authentication failed (error in response)");
+    }
+    // Check for denied
+    else if (json.find(L"\"type\":\"denied\"") != std::wstring::npos ||
+             json.find(L"access_denied") != std::wstring::npos)
+    {
+        response.success = false;
+        response.message = L"Access denied";
+        LOG("Parsed: Access denied");
     }
     else
     {
@@ -484,6 +529,9 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
         response.message = L"Unknown response";
         LOG("Parsed: Unknown response format");
     }
+
+    LOG("InitiateAuthentication response: success=%d, requiresOTP=%d, requiresPassword=%d", 
+        response.success, response.requiresOTP, response.requiresPassword);
 
     return response;
 }
