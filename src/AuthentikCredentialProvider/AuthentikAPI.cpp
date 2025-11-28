@@ -15,7 +15,9 @@ AuthentikAPI::AuthentikAPI() :
     _serverPort(443),
     _flowSlug(L""),   // Will be loaded from registry
     _useHttps(true),
-    _ignoreSslErrors(false)  // Secure by default
+    _ignoreSslErrors(false),  // Secure by default
+    _hSession(nullptr),
+    _hConnect(nullptr)
 {
     LOG("AuthentikAPI::Constructor");
     _LoadConfiguration();
@@ -31,12 +33,94 @@ AuthentikAPI::AuthentikAPI() :
         LOG("ERROR: FlowSlug not configured in registry!");
         _flowSlug = L"default-authentication-flow";  // Fallback
     }
+
+    // Initialize persistent session for cookie management
+    _InitializeSession();
+    
+    LOG("AuthentikAPI::Constructor - API client created");
 }
 
 // Destructor
 AuthentikAPI::~AuthentikAPI()
 {
     LOG("AuthentikAPI::Destructor");
+    
+    // Clean up session handles
+    if (_hConnect)
+    {
+        WinHttpCloseHandle(_hConnect);
+        _hConnect = nullptr;
+    }
+    if (_hSession)
+    {
+        WinHttpCloseHandle(_hSession);
+        _hSession = nullptr;
+    }
+}
+
+// Initialize HTTP session (called once, maintains cookies)
+bool AuthentikAPI::_InitializeSession()
+{
+    LOG("Initializing HTTP session for cookie management");
+
+    // Close existing handles if any
+    if (_hConnect)
+    {
+        WinHttpCloseHandle(_hConnect);
+        _hConnect = nullptr;
+    }
+    if (_hSession)
+    {
+        WinHttpCloseHandle(_hSession);
+        _hSession = nullptr;
+    }
+
+    // Create session
+    _hSession = WinHttpOpen(
+        L"AuthentikCredentialProvider/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS,
+        0);
+
+    if (!_hSession)
+    {
+        LOG("ERROR: WinHttpOpen failed: %d", GetLastError());
+        return false;
+    }
+
+    // Enable cookies (automatic cookie handling)
+    DWORD dwOption = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(_hSession, WINHTTP_OPTION_REDIRECT_POLICY, &dwOption, sizeof(dwOption));
+
+    // Set TLS 1.2 (required for modern servers)
+    DWORD dwSecureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+    WinHttpSetOption(_hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &dwSecureProtocols, sizeof(dwSecureProtocols));
+
+    // Connect to server (persistent connection for cookies)
+    _hConnect = WinHttpConnect(
+        _hSession,
+        _serverUrl.c_str(),
+        _serverPort,
+        0);
+
+    if (!_hConnect)
+    {
+        LOG("ERROR: WinHttpConnect failed: %d", GetLastError());
+        WinHttpCloseHandle(_hSession);
+        _hSession = nullptr;
+        return false;
+    }
+
+    LOG("HTTP session initialized successfully (cookies enabled)");
+    return true;
+}
+
+// Reset the session (clear cookies for new auth flow)
+void AuthentikAPI::ResetSession()
+{
+    LOG("Resetting HTTP session (clearing cookies)");
+    _InitializeSession();
 }
 
 // Initiate authentication flow
@@ -212,7 +296,7 @@ void AuthentikAPI::_LoadConfiguration()
     }
 }
 
-// Make HTTP request
+// Make HTTP request (uses persistent session for cookie management)
 HRESULT AuthentikAPI::_MakeHttpRequest(
     const std::wstring& method,
     const std::wstring& url,
@@ -222,50 +306,24 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     LOG("HTTP %S %S", method.c_str(), url.c_str());
 
     HRESULT hr = E_FAIL;
-    HINTERNET hSession = nullptr;
-    HINTERNET hConnect = nullptr;
     HINTERNET hRequest = nullptr;
 
-    // Initialize WinHTTP
-    hSession = WinHttpOpen(
-        L"AuthentikCredentialProvider/1.0",
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-        WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS,
-        0);
-
-    if (!hSession)
+    // Ensure session is initialized
+    if (!_hSession || !_hConnect)
     {
-        LOG("WinHttpOpen failed: %d", GetLastError());
-        return E_FAIL;
+        LOG("Session not initialized, initializing now...");
+        if (!_InitializeSession())
+        {
+            LOG("ERROR: Failed to initialize session");
+            return E_FAIL;
+        }
     }
 
-    // Set TLS 1.2 (required for modern servers)
-    DWORD dwSecureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-    if (!WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &dwSecureProtocols, sizeof(dwSecureProtocols)))
-    {
-        LOG("WARNING: Failed to set TLS 1.2: %d", GetLastError());
-    }
-
-    // Connect to server
-    hConnect = WinHttpConnect(
-        hSession,
-        _serverUrl.c_str(),
-        _serverPort,
-        0);
-
-    if (!hConnect)
-    {
-        LOG("WinHttpConnect failed: %d", GetLastError());
-        WinHttpCloseHandle(hSession);
-        return E_FAIL;
-    }
-
-    // Create request
+    // Create request (using persistent connection for cookies)
     DWORD dwFlags = _useHttps ? WINHTTP_FLAG_SECURE : 0;
     
     hRequest = WinHttpOpenRequest(
-        hConnect,
+        _hConnect,  // Use persistent connection
         method.c_str(),
         url.c_str(),
         nullptr,
@@ -276,40 +334,19 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     if (!hRequest)
     {
         LOG("WinHttpOpenRequest failed: %d", GetLastError());
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
         return E_FAIL;
     }
 
     // Disable SSL certificate validation if configured (for testing with self-signed certs)
-    // Must be set BEFORE sending the request
     if (_useHttps && _ignoreSslErrors)
     {
-        // Try to set on request handle
         DWORD dwSecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                           SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
                           SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
                           SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
         
-        BOOL bResult = WinHttpSetOption(
-            hRequest,
-            WINHTTP_OPTION_SECURITY_FLAGS,
-            &dwSecFlags,
-            sizeof(dwSecFlags));
-        
-        if (bResult)
-        {
-            LOG("WARNING: SSL certificate validation disabled (IgnoreSslErrors=1)");
-        }
-        else
-        {
-            DWORD err = GetLastError();
-            LOG("ERROR: Failed to disable SSL validation: %d (0x%08x)", err, err);
-        }
-    }
-    else if (_useHttps)
-    {
-        LOG("SSL certificate validation enabled (secure mode)");
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
+        LOG("WARNING: SSL certificate validation disabled");
     }
 
     // Set headers
@@ -347,52 +384,16 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     {
         DWORD dwError = GetLastError();
         LOG("WinHttpSendRequest failed: %d (0x%08x)", dwError, dwError);
-        if (dwError == ERROR_WINHTTP_SECURE_FAILURE)
-        {
-            LOG("SSL/TLS error - certificate validation failed");
-        }
         goto cleanup;
     }
 
     // Receive response
     bResult = WinHttpReceiveResponse(hRequest, nullptr);
     
-    // If SSL error and we're configured to ignore, try again with flags set
-    if (!bResult && _ignoreSslErrors)
-    {
-        DWORD dwError = GetLastError();
-        if (dwError == ERROR_WINHTTP_SECURE_FAILURE || dwError == 12156)
-        {
-            LOG("SSL error on receive, attempting to ignore and retry...");
-            
-            // Set security flags again
-            DWORD dwSecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                              SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                              SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                              SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-            
-            WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
-            
-            // Retry receive
-            bResult = WinHttpReceiveResponse(hRequest, nullptr);
-        }
-    }
-    
     if (!bResult)
     {
         DWORD dwError = GetLastError();
         LOG("WinHttpReceiveResponse failed: %d (0x%08x)", dwError, dwError);
-        if (dwError == ERROR_WINHTTP_SECURE_FAILURE || dwError == 12156)
-        {
-            LOG("SSL/TLS secure failure during response");
-            // Try to get more details
-            DWORD dwFlags = 0;
-            DWORD dwSize = sizeof(dwFlags);
-            if (WinHttpQueryOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, &dwSize))
-            {
-                LOG("Current security flags: 0x%08x", dwFlags);
-            }
-        }
         goto cleanup;
     }
 
@@ -402,52 +403,51 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         DWORD dwDownloaded = 0;
         std::vector<char> responseBuffer;
 
-    do
-    {
-        dwSize = 0;
-        if (!WinHttpQueryDataAvailable(hRequest, &dwSize))
+        do
         {
-            LOG("WinHttpQueryDataAvailable failed: %d", GetLastError());
-            break;
-        }
+            dwSize = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &dwSize))
+            {
+                LOG("WinHttpQueryDataAvailable failed: %d", GetLastError());
+                break;
+            }
 
-        if (dwSize == 0)
-            break;
+            if (dwSize == 0)
+                break;
 
-        std::vector<char> tempBuffer(dwSize + 1);
-        ZeroMemory(&tempBuffer[0], dwSize + 1);
+            std::vector<char> tempBuffer(dwSize + 1);
+            ZeroMemory(&tempBuffer[0], dwSize + 1);
 
-        if (!WinHttpReadData(hRequest, &tempBuffer[0], dwSize, &dwDownloaded))
+            if (!WinHttpReadData(hRequest, &tempBuffer[0], dwSize, &dwDownloaded))
+            {
+                LOG("WinHttpReadData failed: %d", GetLastError());
+                break;
+            }
+
+            responseBuffer.insert(responseBuffer.end(), tempBuffer.begin(), tempBuffer.begin() + dwDownloaded);
+
+        } while (dwSize > 0);
+
+        // Convert response to wide string
+        if (!responseBuffer.empty())
         {
-            LOG("WinHttpReadData failed: %d", GetLastError());
-            break;
-        }
-
-        responseBuffer.insert(responseBuffer.end(), tempBuffer.begin(), tempBuffer.begin() + dwDownloaded);
-
-    } while (dwSize > 0);
-
-    // Convert response to wide string
-    if (!responseBuffer.empty())
-    {
-        responseBuffer.push_back('\0');
-        int wideSize = MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, nullptr, 0);
-        if (wideSize > 0)
-        {
-            std::vector<wchar_t> wideBuffer(wideSize);
-            MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, &wideBuffer[0], wideSize);
-            responseBody = &wideBuffer[0];
-            
-            LOG("Response received: %d bytes", responseBuffer.size());
-            hr = S_OK;
+            responseBuffer.push_back('\0');
+            int wideSize = MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, nullptr, 0);
+            if (wideSize > 0)
+            {
+                std::vector<wchar_t> wideBuffer(wideSize);
+                MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, &wideBuffer[0], wideSize);
+                responseBody = &wideBuffer[0];
+                
+                LOG("Response received: %d bytes", responseBuffer.size());
+                hr = S_OK;
+            }
         }
     }
-    } // End of scope block
 
 cleanup:
     if (hRequest) WinHttpCloseHandle(hRequest);
-    if (hConnect) WinHttpCloseHandle(hConnect);
-    if (hSession) WinHttpCloseHandle(hSession);
+    // Don't close _hSession and _hConnect - they're persistent for cookies!
 
     return hr;
 }
