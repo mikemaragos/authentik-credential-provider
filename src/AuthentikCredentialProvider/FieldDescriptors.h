@@ -36,8 +36,8 @@ struct FIELD_STATE_PAIR
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
     { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),                  CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik OTP Login"),   CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Enter your credentials"), CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik Login"),       CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Enter your username"),   CPFG_CREDENTIAL_PROVIDER_LABEL },
     { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),              CPFG_NONE },
     { FID_PASSWORD,   CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"Password"),              CPFG_NONE },
     { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"OTP Code"),              CPFG_NONE },
@@ -51,7 +51,7 @@ static const FIELD_STATE_PAIR s_rgFieldStatePairs[] =
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_LARGE_TEXT
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SMALL_TEXT
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_FOCUSED },  // FID_USERNAME - focused!
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_PASSWORD
+    { CPFS_HIDDEN, CPFIS_NONE },                       // FID_PASSWORD - HIDDEN (passwordless)
     { CPFS_HIDDEN, CPFIS_NONE },                       // FID_OTP (hidden initially)
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SUBMIT
 };
