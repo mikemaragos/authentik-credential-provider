@@ -188,11 +188,9 @@ SECURITY_STATUS WINAPI KSPSecretAgreement(NCRYPT_PROV_HANDLE h, NCRYPT_KEY_HANDL
 SECURITY_STATUS WINAPI KSPDeriveKey(NCRYPT_PROV_HANDLE h, NCRYPT_SECRET_HANDLE sec, LPCWSTR kdf, NCryptBufferDesc *params, PBYTE key, DWORD cbKey, DWORD *pcb, ULONG f) { return NTE_NOT_SUPPORTED; }
 SECURITY_STATUS WINAPI KSPFreeSecret(NCRYPT_PROV_HANDLE h, NCRYPT_SECRET_HANDLE sec) { return NTE_NOT_SUPPORTED; }
 
-// Function table with correct layout - DWORD followed by pointers
-#pragma pack(push, 8)
+// Function table with correct layout
 typedef struct _KSP_FUNCTION_TABLE {
     DWORD Version;
-    DWORD Padding;  // Align to 8 bytes for x64
     void* OpenProvider;
     void* OpenKey;
     void* CreatePersistedKey;
@@ -220,7 +218,6 @@ typedef struct _KSP_FUNCTION_TABLE {
     void* DeriveKey;
     void* FreeSecret;
 } KSP_FUNCTION_TABLE;
-#pragma pack(pop)
 
 static KSP_FUNCTION_TABLE g_FunctionTable = {0};
 
