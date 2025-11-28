@@ -12,9 +12,9 @@
 static const FIELD_STATE_PAIR s_rgFieldStatePairsLogon[] =
 {
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },                   // FID_LOGO
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_FOCUSED },                // FID_LARGE_TEXT
+    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },                   // FID_LARGE_TEXT
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },                   // FID_SMALL_TEXT
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },                   // FID_USERNAME
+    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_FOCUSED },                // FID_USERNAME - focused!
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },                   // FID_PASSWORD
     { CPFS_HIDDEN, CPFIS_NONE },                                     // FID_OTP (hidden initially)
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },                   // FID_SUBMIT
