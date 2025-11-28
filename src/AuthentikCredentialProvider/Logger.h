@@ -7,12 +7,15 @@
 #include <stdio.h>
 #include <strsafe.h>
 
-// Enable logging in debug builds
-#ifdef _DEBUG
+// ALWAYS enable logging for now (change to 0 for production)
 #define ENABLE_LOGGING 1
-#else
-#define ENABLE_LOGGING 0
-#endif
+
+// To disable logging in Release builds, use this instead:
+// #ifdef _DEBUG
+// #define ENABLE_LOGGING 1
+// #else
+// #define ENABLE_LOGGING 0
+// #endif
 
 // Log macro
 #if ENABLE_LOGGING
