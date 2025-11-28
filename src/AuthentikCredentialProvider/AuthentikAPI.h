@@ -12,6 +12,7 @@ struct AuthentikResponse
 {
     bool success;
     bool requiresOTP;
+    bool requiresPassword;  // For multi-stage flows where password is sent separately
     std::wstring message;
     std::wstring transactionId;
     std::wstring windowsPassword;  // For passwordless scenarios
