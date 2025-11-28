@@ -21,9 +21,9 @@ static PAUTHENTIK_KEY g_pCurrentKey = NULL;
 // BCrypt algorithm provider
 static BCRYPT_ALG_HANDLE g_hRsaAlg = NULL;
 
-// Function table
+// Function table - first field is Version, not size!
 static AUTHENTIK_KSP_FUNCTION_TABLE g_FunctionTable = {
-    sizeof(AUTHENTIK_KSP_FUNCTION_TABLE),
+    NCRYPT_KEY_STORAGE_INTERFACE_VERSION,  // 0x00010000
     KSPOpenProvider,
     KSPOpenKey,
     KSPCreatePersistedKey,
