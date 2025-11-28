@@ -26,7 +26,8 @@ CAuthentikCredential::CAuthentikCredential() :
     _cpus(CPUS_INVALID),
     _ulAuthPackage(0),
     _currentStep(AuthStep::STEP_USERNAME_PASSWORD),
-    _pAuthentikAPI(nullptr)
+    _pAuthentikAPI(nullptr),
+    _pCredentialEvents(nullptr)
 {
     DllAddRef();
     LOG("CAuthentikCredential::Constructor");
@@ -36,6 +37,7 @@ CAuthentikCredential::CAuthentikCredential() :
 
     // Initialize API client
     _pAuthentikAPI = new AuthentikAPI();
+    LOG("CAuthentikCredential::Constructor - API client created");
 }
 
 // Destructor
@@ -230,16 +232,20 @@ HRESULT CAuthentikCredential::GetComboBoxValueAt(DWORD dwFieldID, DWORD dwItem, 
 
 HRESULT CAuthentikCredential::GetSubmitButtonValue(DWORD dwFieldID, DWORD* pdwAdjacentTo)
 {
+    LOG("GetSubmitButtonValue: dwFieldID=%d", dwFieldID);
+    
     if (dwFieldID == FID_SUBMIT)
     {
         // Submit button is adjacent to password or OTP field depending on step
         if (_currentStep == AuthStep::STEP_USERNAME_PASSWORD)
         {
             *pdwAdjacentTo = FID_PASSWORD;
+            LOG("GetSubmitButtonValue: adjacent to PASSWORD field");
         }
         else
         {
             *pdwAdjacentTo = FID_OTP;
+            LOG("GetSubmitButtonValue: adjacent to OTP field");
         }
         return S_OK;
     }
