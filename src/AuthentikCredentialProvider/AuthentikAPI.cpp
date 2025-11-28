@@ -223,6 +223,13 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         return E_FAIL;
     }
 
+    // Set TLS 1.2 (required for modern servers)
+    DWORD dwSecureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+    if (!WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &dwSecureProtocols, sizeof(dwSecureProtocols)))
+    {
+        LOG("WARNING: Failed to set TLS 1.2: %d", GetLastError());
+    }
+
     // Connect to server
     hConnect = WinHttpConnect(
         hSession,
@@ -258,8 +265,10 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     }
 
     // Disable SSL certificate validation if configured (for testing with self-signed certs)
+    // Must be set BEFORE sending the request
     if (_useHttps && _ignoreSslErrors)
     {
+        // Try to set on request handle
         DWORD dwSecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                           SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
                           SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
@@ -277,7 +286,8 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         }
         else
         {
-            LOG("ERROR: Failed to disable SSL validation: %d", GetLastError());
+            DWORD err = GetLastError();
+            LOG("ERROR: Failed to disable SSL validation: %d (0x%08x)", err, err);
         }
     }
     else if (_useHttps)
@@ -329,11 +339,33 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
 
     // Receive response
     bResult = WinHttpReceiveResponse(hRequest, nullptr);
+    
+    // If SSL error and we're configured to ignore, try again with flags set
+    if (!bResult && _ignoreSslErrors)
+    {
+        DWORD dwError = GetLastError();
+        if (dwError == ERROR_WINHTTP_SECURE_FAILURE || dwError == 12156)
+        {
+            LOG("SSL error on receive, attempting to ignore and retry...");
+            
+            // Set security flags again
+            DWORD dwSecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                              SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                              SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                              SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+            
+            WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
+            
+            // Retry receive
+            bResult = WinHttpReceiveResponse(hRequest, nullptr);
+        }
+    }
+    
     if (!bResult)
     {
         DWORD dwError = GetLastError();
         LOG("WinHttpReceiveResponse failed: %d (0x%08x)", dwError, dwError);
-        if (dwError == ERROR_WINHTTP_SECURE_FAILURE)
+        if (dwError == ERROR_WINHTTP_SECURE_FAILURE || dwError == 12156)
         {
             LOG("SSL/TLS secure failure during response");
             // Try to get more details
@@ -341,7 +373,7 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
             DWORD dwSize = sizeof(dwFlags);
             if (WinHttpQueryOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, &dwSize))
             {
-                LOG("Security flags: 0x%08x", dwFlags);
+                LOG("Current security flags: 0x%08x", dwFlags);
             }
         }
         goto cleanup;
