@@ -458,7 +458,7 @@ HRESULT CAuthentikCredential::_PackCredentialsAndReturn(
     LPWSTR* ppwszOptionalStatusText,
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
-    LOG("_PackCredentialsAndReturn");
+    LOG("_PackCredentialsAndReturn - UsageScenario: %d", _cpus);
 
     // Get domain name (you may want to make this configurable)
     std::wstring domain = L"TEST";  // TODO: Get from registry or configuration
@@ -466,13 +466,29 @@ HRESULT CAuthentikCredential::_PackCredentialsAndReturn(
     // Pack credentials
     BYTE* pPackage = nullptr;
     DWORD cbPackage = 0;
+    HRESULT hr;
 
-    HRESULT hr = PackKerbInteractiveLogon(
-        username,
-        password,
-        domain,
-        &pPackage,
-        &cbPackage);
+    // Use different packing based on usage scenario
+    if (_cpus == CPUS_UNLOCK_WORKSTATION)
+    {
+        LOG("Using UNLOCK_LOGON for workstation unlock");
+        hr = PackKerbInteractiveUnlockLogon(
+            username,
+            password,
+            domain,
+            &pPackage,
+            &cbPackage);
+    }
+    else
+    {
+        LOG("Using INTERACTIVE_LOGON for logon");
+        hr = PackKerbInteractiveLogon(
+            username,
+            password,
+            domain,
+            &pPackage,
+            &cbPackage);
+    }
 
     if (SUCCEEDED(hr))
     {
