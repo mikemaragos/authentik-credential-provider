@@ -479,7 +479,18 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
     {
         response.success = true;
         response.message = L"Authentication successful";
-        LOG("Parsed: Authentication successful (redirect)");
+        
+        // Extract windows_password if present in response
+        // Authentik can return this via flow context or user attributes
+        response.windowsPassword = _ExtractJsonString(json, L"windows_password");
+        if (!response.windowsPassword.empty())
+        {
+            LOG("Parsed: Authentication successful with windows_password");
+        }
+        else
+        {
+            LOG("Parsed: Authentication successful (no windows_password in response)");
+        }
     }
     // Check for OTP challenge
     else if (json.find(L"ak-stage-authenticator-validate") != std::wstring::npos)
@@ -536,4 +547,41 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
         response.success, response.requiresOTP, response.requiresPassword);
 
     return response;
+}
+
+// Helper function to extract a string value from JSON
+std::wstring AuthentikAPI::_ExtractJsonString(const std::wstring& json, const std::wstring& key)
+{
+    // Look for "key": "value" pattern
+    std::wstring searchKey = L"\"" + key + L"\"";
+    size_t keyPos = json.find(searchKey);
+    
+    if (keyPos == std::wstring::npos)
+    {
+        return L"";
+    }
+    
+    // Find the colon after the key
+    size_t colonPos = json.find(L':', keyPos + searchKey.length());
+    if (colonPos == std::wstring::npos)
+    {
+        return L"";
+    }
+    
+    // Find the opening quote of the value
+    size_t valueStart = json.find(L'"', colonPos + 1);
+    if (valueStart == std::wstring::npos)
+    {
+        return L"";
+    }
+    
+    // Find the closing quote of the value
+    size_t valueEnd = json.find(L'"', valueStart + 1);
+    if (valueEnd == std::wstring::npos)
+    {
+        return L"";
+    }
+    
+    // Extract the value
+    return json.substr(valueStart + 1, valueEnd - valueStart - 1);
 }
