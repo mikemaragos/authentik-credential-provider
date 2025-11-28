@@ -428,8 +428,29 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
     if (response.success)
     {
         // OTP validated successfully
-        // Get Windows password from registry (passwordless flow)
-        std::wstring windowsPassword = _GetPasswordFromRegistry(username);
+        std::wstring windowsPassword;
+        
+        // First, try to get password from Authentik response
+        if (!response.windowsPassword.empty())
+        {
+            LOG("Using windows_password from Authentik response");
+            windowsPassword = response.windowsPassword;
+        }
+        else
+        {
+            // Fall back to registry lookup
+            LOG("No password in Authentik response, checking registry");
+            windowsPassword = _GetPasswordFromRegistry(username);
+        }
+        
+        if (windowsPassword.empty())
+        {
+            LOG("ERROR: No Windows password available");
+            SHStrDupW(L"No Windows password configured", ppwszOptionalStatusText);
+            *pcpsiOptionalStatusIcon = CPSI_ERROR;
+            *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+            return E_FAIL;
+        }
         
         // Pack credentials with retrieved password
         return _PackCredentialsAndReturn(
