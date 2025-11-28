@@ -85,44 +85,59 @@ HRESULT PackKerbInteractiveLogon(
     BYTE* pStringBuffer = pBuffer + sizeof(KERB_INTERACTIVE_LOGON);
 
     // Copy and setup username
+    // CRITICAL: Buffer must be OFFSET from structure start, not absolute pointer!
     if (!username.empty())
     {
         memcpy(pStringBuffer, username.c_str(), cbUsername);
-        InitUnicodeString(&pkil->UserName, (PWSTR)pStringBuffer);
+        pkil->UserName.Length = (USHORT)(username.length() * sizeof(WCHAR));
+        pkil->UserName.MaximumLength = (USHORT)cbUsername;
+        pkil->UserName.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // OFFSET, not pointer!
+        LOG("Username copied: offset=%d, Length: %d", (int)(pStringBuffer - pBuffer), pkil->UserName.Length);
         pStringBuffer += cbUsername;
-        LOG("Username copied: %S (Length: %d)", pkil->UserName.Buffer, pkil->UserName.Length);
     }
     else
     {
-        InitUnicodeString(&pkil->UserName, nullptr);
+        pkil->UserName.Length = 0;
+        pkil->UserName.MaximumLength = 0;
+        pkil->UserName.Buffer = nullptr;
         LOG("Username is empty");
     }
 
     // Copy and setup password
+    // CRITICAL: Buffer must be OFFSET from structure start, not absolute pointer!
     if (!password.empty())
     {
         memcpy(pStringBuffer, password.c_str(), cbPassword);
-        InitUnicodeString(&pkil->Password, (PWSTR)pStringBuffer);
+        pkil->Password.Length = (USHORT)(password.length() * sizeof(WCHAR));
+        pkil->Password.MaximumLength = (USHORT)cbPassword;
+        pkil->Password.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // OFFSET, not pointer!
+        LOG("Password copied: offset=%d, Length: %d", (int)(pStringBuffer - pBuffer), pkil->Password.Length);
         pStringBuffer += cbPassword;
-        LOG("Password copied (Length: %d)", pkil->Password.Length);
     }
     else
     {
-        InitUnicodeString(&pkil->Password, nullptr);
+        pkil->Password.Length = 0;
+        pkil->Password.MaximumLength = 0;
+        pkil->Password.Buffer = nullptr;
         LOG("Password is empty");
     }
 
     // Copy and setup domain
+    // CRITICAL: Buffer must be OFFSET from structure start, not absolute pointer!
     if (!domain.empty())
     {
         memcpy(pStringBuffer, domain.c_str(), cbDomain);
-        InitUnicodeString(&pkil->LogonDomainName, (PWSTR)pStringBuffer);
+        pkil->LogonDomainName.Length = (USHORT)(domain.length() * sizeof(WCHAR));
+        pkil->LogonDomainName.MaximumLength = (USHORT)cbDomain;
+        pkil->LogonDomainName.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // OFFSET, not pointer!
+        LOG("Domain copied: offset=%d, Length: %d", (int)(pStringBuffer - pBuffer), pkil->LogonDomainName.Length);
         pStringBuffer += cbDomain;
-        LOG("Domain copied: %S (Length: %d)", pkil->LogonDomainName.Buffer, pkil->LogonDomainName.Length);
     }
     else
     {
-        InitUnicodeString(&pkil->LogonDomainName, nullptr);
+        pkil->LogonDomainName.Length = 0;
+        pkil->LogonDomainName.MaximumLength = 0;
+        pkil->LogonDomainName.Buffer = nullptr;
         LOG("Domain is empty");
     }
 
@@ -188,40 +203,52 @@ HRESULT PackKerbInteractiveUnlockLogon(
     // String buffer starts after the structure
     BYTE* pStringBuffer = pBuffer + sizeof(KERB_INTERACTIVE_UNLOCK_LOGON);
 
-    // Copy username
+    // Copy username - use OFFSET not absolute pointer
     if (!username.empty())
     {
         memcpy(pStringBuffer, username.c_str(), cbUsername);
-        InitUnicodeString(&pkiul->Logon.UserName, (PWSTR)pStringBuffer);
+        pkiul->Logon.UserName.Length = (USHORT)(username.length() * sizeof(WCHAR));
+        pkiul->Logon.UserName.MaximumLength = (USHORT)cbUsername;
+        pkiul->Logon.UserName.Buffer = (PWSTR)(pStringBuffer - pBuffer);
         pStringBuffer += cbUsername;
     }
     else
     {
-        InitUnicodeString(&pkiul->Logon.UserName, nullptr);
+        pkiul->Logon.UserName.Length = 0;
+        pkiul->Logon.UserName.MaximumLength = 0;
+        pkiul->Logon.UserName.Buffer = nullptr;
     }
 
-    // Copy password
+    // Copy password - use OFFSET not absolute pointer
     if (!password.empty())
     {
         memcpy(pStringBuffer, password.c_str(), cbPassword);
-        InitUnicodeString(&pkiul->Logon.Password, (PWSTR)pStringBuffer);
+        pkiul->Logon.Password.Length = (USHORT)(password.length() * sizeof(WCHAR));
+        pkiul->Logon.Password.MaximumLength = (USHORT)cbPassword;
+        pkiul->Logon.Password.Buffer = (PWSTR)(pStringBuffer - pBuffer);
         pStringBuffer += cbPassword;
     }
     else
     {
-        InitUnicodeString(&pkiul->Logon.Password, nullptr);
+        pkiul->Logon.Password.Length = 0;
+        pkiul->Logon.Password.MaximumLength = 0;
+        pkiul->Logon.Password.Buffer = nullptr;
     }
 
-    // Copy domain
+    // Copy domain - use OFFSET not absolute pointer
     if (!domain.empty())
     {
         memcpy(pStringBuffer, domain.c_str(), cbDomain);
-        InitUnicodeString(&pkiul->Logon.LogonDomainName, (PWSTR)pStringBuffer);
+        pkiul->Logon.LogonDomainName.Length = (USHORT)(domain.length() * sizeof(WCHAR));
+        pkiul->Logon.LogonDomainName.MaximumLength = (USHORT)cbDomain;
+        pkiul->Logon.LogonDomainName.Buffer = (PWSTR)(pStringBuffer - pBuffer);
         pStringBuffer += cbDomain;
     }
     else
     {
-        InitUnicodeString(&pkiul->Logon.LogonDomainName, nullptr);
+        pkiul->Logon.LogonDomainName.Length = 0;
+        pkiul->Logon.LogonDomainName.MaximumLength = 0;
+        pkiul->Logon.LogonDomainName.Buffer = nullptr;
     }
 
     // Set LogonId to zero (required for unlock)
