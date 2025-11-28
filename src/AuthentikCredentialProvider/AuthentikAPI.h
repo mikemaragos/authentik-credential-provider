@@ -30,11 +30,17 @@ public:
     // Validate OTP
     AuthentikResponse ValidateOTP(const std::wstring& username, const std::wstring& otp, const std::wstring& transactionId);
 
+    // Reset the session (clear cookies)
+    void ResetSession();
+
 private:
     // Load configuration from registry
     void _LoadConfiguration();
 
-    // Make HTTP request to Authentik
+    // Initialize HTTP session
+    bool _InitializeSession();
+
+    // Make HTTP request to Authentik (uses persistent session for cookies)
     HRESULT _MakeHttpRequest(const std::wstring& method, const std::wstring& url, const std::wstring& payload, std::wstring& responseBody);
 
     // Parse Authentik JSON response
@@ -46,4 +52,8 @@ private:
     std::wstring _flowSlug;
     bool _useHttps;
     bool _ignoreSslErrors;  // For testing with self-signed certificates
+
+    // Persistent session handles for cookie management
+    HINTERNET _hSession;
+    HINTERNET _hConnect;
 };
