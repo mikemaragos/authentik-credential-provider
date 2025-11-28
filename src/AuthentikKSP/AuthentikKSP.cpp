@@ -188,43 +188,76 @@ SECURITY_STATUS WINAPI KSPSecretAgreement(NCRYPT_PROV_HANDLE h, NCRYPT_KEY_HANDL
 SECURITY_STATUS WINAPI KSPDeriveKey(NCRYPT_PROV_HANDLE h, NCRYPT_SECRET_HANDLE sec, LPCWSTR kdf, NCryptBufferDesc *params, PBYTE key, DWORD cbKey, DWORD *pcb, ULONG f) { return NTE_NOT_SUPPORTED; }
 SECURITY_STATUS WINAPI KSPFreeSecret(NCRYPT_PROV_HANDLE h, NCRYPT_SECRET_HANDLE sec) { return NTE_NOT_SUPPORTED; }
 
-// Function table - defined as array of void pointers
-static void* g_FunctionTable[28] = {0};
+// Function table with correct layout - DWORD followed by pointers
+#pragma pack(push, 8)
+typedef struct _KSP_FUNCTION_TABLE {
+    DWORD Version;
+    DWORD Padding;  // Align to 8 bytes for x64
+    void* OpenProvider;
+    void* OpenKey;
+    void* CreatePersistedKey;
+    void* GetProviderProperty;
+    void* GetKeyProperty;
+    void* SetProviderProperty;
+    void* SetKeyProperty;
+    void* FinalizeKey;
+    void* DeleteKey;
+    void* FreeProvider;
+    void* FreeKey;
+    void* FreeBuffer;
+    void* Encrypt;
+    void* Decrypt;
+    void* IsAlgSupported;
+    void* EnumAlgorithms;
+    void* EnumKeys;
+    void* ImportKey;
+    void* ExportKey;
+    void* SignHash;
+    void* VerifySignature;
+    void* PromptUser;
+    void* NotifyChangeKey;
+    void* SecretAgreement;
+    void* DeriveKey;
+    void* FreeSecret;
+} KSP_FUNCTION_TABLE;
+#pragma pack(pop)
+
+static KSP_FUNCTION_TABLE g_FunctionTable = {0};
 
 NTSTATUS WINAPI GetKeyStorageInterface(LPCWSTR pszProviderName, void **ppFunctionTable, DWORD dwFlags) {
     Log("GetKeyStorageInterface");
     if (!g_bInit) { InitializeCriticalSection(&g_cs); g_bInit = TRUE; }
     if (!ppFunctionTable) return STATUS_INVALID_PARAMETER;
     
-    g_FunctionTable[0] = (void*)(ULONG_PTR)0x00010000;  // Version
-    g_FunctionTable[1] = (void*)KSPOpenProvider;
-    g_FunctionTable[2] = (void*)KSPOpenKey;
-    g_FunctionTable[3] = (void*)KSPCreatePersistedKey;
-    g_FunctionTable[4] = (void*)KSPGetProviderProperty;
-    g_FunctionTable[5] = (void*)KSPGetKeyProperty;
-    g_FunctionTable[6] = (void*)KSPSetProviderProperty;
-    g_FunctionTable[7] = (void*)KSPSetKeyProperty;
-    g_FunctionTable[8] = (void*)KSPFinalizeKey;
-    g_FunctionTable[9] = (void*)KSPDeleteKey;
-    g_FunctionTable[10] = (void*)KSPFreeProvider;
-    g_FunctionTable[11] = (void*)KSPFreeKey;
-    g_FunctionTable[12] = (void*)KSPFreeBuffer;
-    g_FunctionTable[13] = (void*)KSPEncrypt;
-    g_FunctionTable[14] = (void*)KSPDecrypt;
-    g_FunctionTable[15] = (void*)KSPIsAlgSupported;
-    g_FunctionTable[16] = (void*)KSPEnumAlgorithms;
-    g_FunctionTable[17] = (void*)KSPEnumKeys;
-    g_FunctionTable[18] = (void*)KSPImportKey;
-    g_FunctionTable[19] = (void*)KSPExportKey;
-    g_FunctionTable[20] = (void*)KSPSignHash;
-    g_FunctionTable[21] = (void*)KSPVerifySignature;
-    g_FunctionTable[22] = NULL;  // PromptUser
-    g_FunctionTable[23] = (void*)KSPNotifyChangeKey;
-    g_FunctionTable[24] = (void*)KSPSecretAgreement;
-    g_FunctionTable[25] = (void*)KSPDeriveKey;
-    g_FunctionTable[26] = (void*)KSPFreeSecret;
+    g_FunctionTable.Version = 0x00010000;
+    g_FunctionTable.OpenProvider = (void*)KSPOpenProvider;
+    g_FunctionTable.OpenKey = (void*)KSPOpenKey;
+    g_FunctionTable.CreatePersistedKey = (void*)KSPCreatePersistedKey;
+    g_FunctionTable.GetProviderProperty = (void*)KSPGetProviderProperty;
+    g_FunctionTable.GetKeyProperty = (void*)KSPGetKeyProperty;
+    g_FunctionTable.SetProviderProperty = (void*)KSPSetProviderProperty;
+    g_FunctionTable.SetKeyProperty = (void*)KSPSetKeyProperty;
+    g_FunctionTable.FinalizeKey = (void*)KSPFinalizeKey;
+    g_FunctionTable.DeleteKey = (void*)KSPDeleteKey;
+    g_FunctionTable.FreeProvider = (void*)KSPFreeProvider;
+    g_FunctionTable.FreeKey = (void*)KSPFreeKey;
+    g_FunctionTable.FreeBuffer = (void*)KSPFreeBuffer;
+    g_FunctionTable.Encrypt = (void*)KSPEncrypt;
+    g_FunctionTable.Decrypt = (void*)KSPDecrypt;
+    g_FunctionTable.IsAlgSupported = (void*)KSPIsAlgSupported;
+    g_FunctionTable.EnumAlgorithms = (void*)KSPEnumAlgorithms;
+    g_FunctionTable.EnumKeys = (void*)KSPEnumKeys;
+    g_FunctionTable.ImportKey = (void*)KSPImportKey;
+    g_FunctionTable.ExportKey = (void*)KSPExportKey;
+    g_FunctionTable.SignHash = (void*)KSPSignHash;
+    g_FunctionTable.VerifySignature = (void*)KSPVerifySignature;
+    g_FunctionTable.PromptUser = NULL;
+    g_FunctionTable.NotifyChangeKey = (void*)KSPNotifyChangeKey;
+    g_FunctionTable.SecretAgreement = (void*)KSPSecretAgreement;
+    g_FunctionTable.DeriveKey = (void*)KSPDeriveKey;
+    g_FunctionTable.FreeSecret = (void*)KSPFreeSecret;
     
-    *ppFunctionTable = g_FunctionTable;
+    *ppFunctionTable = &g_FunctionTable;
     return STATUS_SUCCESS;
 }
 
