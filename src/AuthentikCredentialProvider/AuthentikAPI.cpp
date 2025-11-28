@@ -262,15 +262,23 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     {
         DWORD dwSecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                           SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                          SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+                          SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                          SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
         
-        WinHttpSetOption(
+        BOOL bResult = WinHttpSetOption(
             hRequest,
             WINHTTP_OPTION_SECURITY_FLAGS,
             &dwSecFlags,
             sizeof(dwSecFlags));
         
-        LOG("WARNING: SSL certificate validation disabled (IgnoreSslErrors=1 in registry)");
+        if (bResult)
+        {
+            LOG("WARNING: SSL certificate validation disabled (IgnoreSslErrors=1)");
+        }
+        else
+        {
+            LOG("ERROR: Failed to disable SSL validation: %d", GetLastError());
+        }
     }
     else if (_useHttps)
     {
@@ -310,7 +318,12 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
 
     if (!bResult)
     {
-        LOG("WinHttpSendRequest failed: %d", GetLastError());
+        DWORD dwError = GetLastError();
+        LOG("WinHttpSendRequest failed: %d (0x%08x)", dwError, dwError);
+        if (dwError == ERROR_WINHTTP_SECURE_FAILURE)
+        {
+            LOG("SSL/TLS error - certificate validation failed");
+        }
         goto cleanup;
     }
 
@@ -318,7 +331,19 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     bResult = WinHttpReceiveResponse(hRequest, nullptr);
     if (!bResult)
     {
-        LOG("WinHttpReceiveResponse failed: %d", GetLastError());
+        DWORD dwError = GetLastError();
+        LOG("WinHttpReceiveResponse failed: %d (0x%08x)", dwError, dwError);
+        if (dwError == ERROR_WINHTTP_SECURE_FAILURE)
+        {
+            LOG("SSL/TLS secure failure during response");
+            // Try to get more details
+            DWORD dwFlags = 0;
+            DWORD dwSize = sizeof(dwFlags);
+            if (WinHttpQueryOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, &dwSize))
+            {
+                LOG("Security flags: 0x%08x", dwFlags);
+            }
+        }
         goto cleanup;
     }
 
