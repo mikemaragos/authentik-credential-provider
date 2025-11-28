@@ -46,6 +46,9 @@ private:
     // Parse Authentik JSON response
     AuthentikResponse _ParseAuthentikResponse(const std::wstring& json);
 
+    // Extract a string value from JSON
+    std::wstring _ExtractJsonString(const std::wstring& json, const std::wstring& key);
+
     // Configuration
     std::wstring _serverUrl;
     INTERNET_PORT _serverPort;
