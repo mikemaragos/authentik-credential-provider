@@ -190,7 +190,7 @@ SECURITY_STATUS WINAPI KSPFreeSecret(NCRYPT_PROV_HANDLE h, NCRYPT_SECRET_HANDLE 
 
 // Function table with correct layout
 typedef struct _KSP_FUNCTION_TABLE {
-    DWORD Version;
+    ULONG_PTR Version;  // Must be pointer-sized for alignment
     void* OpenProvider;
     void* OpenKey;
     void* CreatePersistedKey;
@@ -226,7 +226,7 @@ NTSTATUS WINAPI GetKeyStorageInterface(LPCWSTR pszProviderName, void **ppFunctio
     if (!g_bInit) { InitializeCriticalSection(&g_cs); g_bInit = TRUE; }
     if (!ppFunctionTable) return STATUS_INVALID_PARAMETER;
     
-    g_FunctionTable.Version = 0x00010000;
+    g_FunctionTable.Version = sizeof(KSP_FUNCTION_TABLE);  // cbSize, not version
     g_FunctionTable.OpenProvider = (void*)KSPOpenProvider;
     g_FunctionTable.OpenKey = (void*)KSPOpenKey;
     g_FunctionTable.CreatePersistedKey = (void*)KSPCreatePersistedKey;
