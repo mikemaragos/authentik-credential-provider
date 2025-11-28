@@ -473,7 +473,9 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
     }
 
     // Check for success (redirect type indicates success)
-    if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos)
+    // Authentik returns either "type":"redirect" or "component":"xak-flow-redirect"
+    if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos ||
+        json.find(L"xak-flow-redirect") != std::wstring::npos)
     {
         response.success = true;
         response.message = L"Authentication successful";
