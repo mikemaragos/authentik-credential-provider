@@ -331,11 +331,10 @@ HRESULT CAuthentikCredential::_HandleUsernamePasswordStep(
     LPWSTR* ppwszOptionalStatusText,
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
-    LOG("_HandleUsernamePasswordStep");
+    LOG("_HandleUsernameStep (passwordless flow)");
 
-    // Get username and password
+    // Get username only (password field is hidden)
     std::wstring username = _rgFieldStrings[FID_USERNAME] ? _rgFieldStrings[FID_USERNAME] : L"";
-    std::wstring password = _rgFieldStrings[FID_PASSWORD] ? _rgFieldStrings[FID_PASSWORD] : L"";
 
     if (username.empty())
     {
@@ -345,19 +344,20 @@ HRESULT CAuthentikCredential::_HandleUsernamePasswordStep(
         return E_FAIL;
     }
 
-    // Cache password for later use
-    _cachedPassword = password;
+    // Store username for later
+    _cachedUsername = username;
 
-    // Call Authentik API to initiate authentication
-    AuthentikResponse response = _pAuthentikAPI->InitiateAuthentication(username, password);
+    // Call Authentik API with just username (passwordless flow)
+    // Authentik flow should be configured to go: Identification -> OTP (no password stage)
+    AuthentikResponse response = _pAuthentikAPI->InitiateAuthentication(username, L"");
 
     if (response.requiresOTP)
     {
         // Store transaction ID
         _transactionId = response.transactionId;
 
-        // Show OTP field
-        _rgFieldStatePairs[FID_PASSWORD].cpfs = CPFS_HIDDEN;
+        // Hide username, show OTP field
+        _rgFieldStatePairs[FID_USERNAME].cpfs = CPFS_HIDDEN;
         _rgFieldStatePairs[FID_OTP].cpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
         _rgFieldStatePairs[FID_OTP].cpfis = CPFIS_FOCUSED;
 
@@ -371,7 +371,7 @@ HRESULT CAuthentikCredential::_HandleUsernamePasswordStep(
         // Notify UI of field changes
         if (_pCredentialEvents)
         {
-            _pCredentialEvents->SetFieldState(this, FID_PASSWORD, CPFS_HIDDEN);
+            _pCredentialEvents->SetFieldState(this, FID_USERNAME, CPFS_HIDDEN);
             _pCredentialEvents->SetFieldState(this, FID_OTP, CPFS_DISPLAY_IN_SELECTED_TILE);
             _pCredentialEvents->SetFieldInteractiveState(this, FID_OTP, CPFIS_FOCUSED);
             _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Enter your OTP code");
@@ -386,7 +386,9 @@ HRESULT CAuthentikCredential::_HandleUsernamePasswordStep(
     else if (response.success)
     {
         // Authentication succeeded without OTP (passthrough case)
-        return _PackCredentialsAndReturn(username, password, pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
+        // Get password from registry for Windows auth
+        std::wstring windowsPassword = _GetPasswordFromRegistry(username);
+        return _PackCredentialsAndReturn(username, windowsPassword, pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
     }
     else
     {
@@ -408,7 +410,9 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
 
     // Get OTP value
     std::wstring otp = _rgFieldStrings[FID_OTP] ? _rgFieldStrings[FID_OTP] : L"";
-    std::wstring username = _rgFieldStrings[FID_USERNAME] ? _rgFieldStrings[FID_USERNAME] : L"";
+    
+    // Use cached username (field is now hidden)
+    std::wstring username = _cachedUsername;
 
     if (otp.empty())
     {
@@ -423,10 +427,14 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
 
     if (response.success)
     {
-        // OTP validated successfully - pack credentials
+        // OTP validated successfully
+        // Get Windows password from registry (passwordless flow)
+        std::wstring windowsPassword = _GetPasswordFromRegistry(username);
+        
+        // Pack credentials with retrieved password
         return _PackCredentialsAndReturn(
             username, 
-            _cachedPassword, 
+            windowsPassword, 
             pcpgsr, 
             pcpcs, 
             ppwszOptionalStatusText, 
@@ -511,9 +519,63 @@ HRESULT CAuthentikCredential::_PackCredentialsAndReturn(
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
     }
 
-    // Clean up cached password
-    SecureZeroMemory(&_cachedPassword[0], _cachedPassword.length() * sizeof(wchar_t));
-    _cachedPassword.clear();
-
     return hr;
+}
+
+// Get Windows password from registry
+// Looks for per-user password first, then falls back to default password
+std::wstring CAuthentikCredential::_GetPasswordFromRegistry(const std::wstring& username)
+{
+    LOG("_GetPasswordFromRegistry: user=%S", username.c_str());
+
+    std::wstring password;
+    HKEY hKey;
+    LONG result = RegOpenKeyExW(
+        HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\AuthentikCredentialProvider",
+        0,
+        KEY_READ,
+        &hKey);
+
+    if (result == ERROR_SUCCESS)
+    {
+        WCHAR buffer[256];
+        DWORD bufferSize = sizeof(buffer);
+
+        // First try per-user password: Password_<username>
+        std::wstring userPasswordKey = L"Password_" + username;
+        result = RegQueryValueExW(hKey, userPasswordKey.c_str(), nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
+        
+        if (result == ERROR_SUCCESS)
+        {
+            password = buffer;
+            LOG("Found per-user password for %S", username.c_str());
+        }
+        else
+        {
+            // Fall back to default password
+            bufferSize = sizeof(buffer);
+            result = RegQueryValueExW(hKey, L"DefaultPassword", nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
+            
+            if (result == ERROR_SUCCESS)
+            {
+                password = buffer;
+                LOG("Using default password");
+            }
+            else
+            {
+                LOG("ERROR: No password found in registry for user %S", username.c_str());
+            }
+        }
+
+        // Securely clear the buffer
+        SecureZeroMemory(buffer, sizeof(buffer));
+        RegCloseKey(hKey);
+    }
+    else
+    {
+        LOG("ERROR: Failed to open registry key: %d", result);
+    }
+
+    return password;
 }
