@@ -5,6 +5,7 @@
 #include <unknwn.h>
 #include <credentialprovider.h>
 #include <strsafe.h>
+#include <new>
 #include "AuthentikCredentialProvider.h"
 #include "Logger.h"
 #include "guid.h"
@@ -14,6 +15,9 @@ HINSTANCE g_hinst = NULL;
 
 // DLL reference count
 long g_cDllRef = 0;
+
+// Forward declaration
+HRESULT CAuthentikProvider_CreateInstance(REFIID riid, void** ppv);
 
 // DllMain
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
@@ -127,7 +131,7 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
     HRESULT hr;
     if (rclsid == CLSID_AuthentikCredentialProvider)
     {
-        CClassFactory* pClassFactory = new (std::nothrow) CClassFactory();
+        CClassFactory* pClassFactory = new(std::nothrow) CClassFactory();
         if (pClassFactory)
         {
             hr = pClassFactory->QueryInterface(riid, ppv);
