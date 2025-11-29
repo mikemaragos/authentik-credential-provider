@@ -46,7 +46,7 @@ AuthentikResponse AuthentikAPI::SubmitUsername(const std::wstring& username)
     AuthentikResponse response;
     _currentUsername = username;
     
-    // First, we need to GET the flow to start a session and get the challenge
+    // First, we need to GET the flow to start a session
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
     
     std::wstring responseBody;
@@ -143,7 +143,7 @@ AuthentikResponse AuthentikAPI::SubmitOTP(const std::wstring& otp)
     response = _ParseAuthentikResponse(responseBody);
     response.rawResponse = responseBody;
     
-    // If successful, populate certificate info
+    // If successful, populate user info
     if (response.status == AuthStatus::SUCCESS)
     {
         response.username = _currentUsername;
@@ -584,8 +584,10 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
     // Log first part of response for debugging
     LOG("Response preview: %.300S", json.c_str());
 
-    // Check for success (redirect type indicates completion)
-    if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos ||
+    // Check for redirect responses (indicates flow completion)
+    // xak-flow-redirect means authentication succeeded and flow is complete
+    if (json.find(L"xak-flow-redirect") != std::wstring::npos ||
+        json.find(L"\"type\":\"redirect\"") != std::wstring::npos ||
         json.find(L"\"type\": \"redirect\"") != std::wstring::npos)
     {
         response.status = AuthStatus::SUCCESS;
@@ -595,45 +597,57 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
         response.certificatePem = _ParseJsonString(json, L"certificate");
         response.privateKeyPem = _ParseJsonString(json, L"private_key");
         
-        LOG("Parsed: SUCCESS");
+        // If redirect has "to" field, it's a success
+        std::wstring redirectTo = _ParseJsonString(json, L"to");
+        LOG("Parsed: SUCCESS - redirect to: %S", redirectTo.c_str());
+        return response;
     }
+    
     // Check for native flow response (component indicates a stage)
-    else if (json.find(L"\"component\"") != std::wstring::npos)
+    if (json.find(L"\"component\"") != std::wstring::npos)
     {
         std::wstring component = _ParseJsonString(json, L"component");
         LOG("Flow component: %S", component.c_str());
         
+        // Check for OTP/authenticator stages
         if (component.find(L"ak-stage-authenticator") != std::wstring::npos ||
             component.find(L"totp") != std::wstring::npos ||
-            component.find(L"otp") != std::wstring::npos)
+            component.find(L"otp") != std::wstring::npos ||
+            component.find(L"authenticator-validate") != std::wstring::npos)
         {
             response.status = AuthStatus::NEED_OTP;
             response.message = L"Enter your OTP code";
             LOG("Parsed: NEED_OTP");
+            return response;
         }
-        else if (component.find(L"ak-stage-identification") != std::wstring::npos)
+        
+        // Check for identification stage
+        if (component.find(L"ak-stage-identification") != std::wstring::npos)
         {
             response.status = AuthStatus::NEED_USERNAME;
             response.message = L"Enter your username";
             LOG("Parsed: NEED_USERNAME");
+            return response;
         }
-        else if (component.find(L"ak-stage-password") != std::wstring::npos)
+        
+        // Check for password stage (might be part of the flow)
+        if (component.find(L"ak-stage-password") != std::wstring::npos)
         {
-            // Password stage - for now treat as needing OTP since we're passwordless
             response.status = AuthStatus::NEED_OTP;
             response.message = L"Enter your verification code";
             LOG("Parsed: NEED_OTP (password stage)");
+            return response;
         }
-        else
-        {
-            // Unknown component, assume OTP needed
-            response.status = AuthStatus::NEED_OTP;
-            response.message = L"Continue authentication";
-            LOG("Parsed: Unknown component, assuming OTP");
-        }
+        
+        // Unknown component but not an error - might need more input
+        response.status = AuthStatus::NEED_OTP;
+        response.message = L"Continue authentication";
+        LOG("Parsed: Unknown component, assuming more input needed");
+        return response;
     }
+    
     // Check for error response
-    else if (json.find(L"\"detail\"") != std::wstring::npos)
+    if (json.find(L"\"detail\"") != std::wstring::npos)
     {
         response.status = AuthStatus::FAILED;
         response.message = _ParseJsonString(json, L"detail");
@@ -642,8 +656,10 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
             response.message = L"Authentication failed";
         }
         LOG("Parsed: FAILED - %S", response.message.c_str());
+        return response;
     }
-    else if (json.find(L"\"error\"") != std::wstring::npos)
+    
+    if (json.find(L"\"error\"") != std::wstring::npos)
     {
         response.status = AuthStatus::FAILED;
         response.message = _ParseJsonString(json, L"error");
@@ -652,15 +668,13 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
             response.message = L"Authentication failed";
         }
         LOG("Parsed: FAILED - %S", response.message.c_str());
-    }
-    else
-    {
-        // Unknown response format
-        response.status = AuthStatus::FAILED;
-        response.message = L"Unknown server response";
-        LOG("Parsed: Unknown response format");
+        return response;
     }
 
+    // No recognized response - treat as needing more input
+    response.status = AuthStatus::NEED_OTP;
+    response.message = L"Continue authentication";
+    LOG("Parsed: Unrecognized format, assuming more input needed");
     return response;
 }
 
