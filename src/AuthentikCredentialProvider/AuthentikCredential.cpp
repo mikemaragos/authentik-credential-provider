@@ -10,6 +10,12 @@
 
 #pragma comment(lib, "Shlwapi.lib")
 
+// External DLL instance
+extern HINSTANCE g_hinst;
+
+// Resource ID for tile icon (add icon.ico to project as resource 101)
+#define IDI_TILE_ICON 101
+
 // Field state pairs for different usage scenarios
 static const FIELD_STATE_PAIR s_rgFieldStatePairsUnlock[] =
 {
@@ -108,6 +114,7 @@ HRESULT CAuthentikCredential::Initialize(
     const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd,
     const FIELD_STATE_PAIR* rgfsp)
 {
+    UNREFERENCED_PARAMETER(rgcpfd);
     UNREFERENCED_PARAMETER(rgfsp);
     
     LOG("CAuthentikCredential::Initialize cpus=%d", cpus);
@@ -121,7 +128,6 @@ HRESULT CAuthentikCredential::Initialize(
     }
 
     // Initialize field strings - NULL means use the label as placeholder
-    // The actual user input will be stored here when SetStringValue is called
     for (DWORD i = 0; i < FID_NUM_FIELDS; i++)
     {
         _rgFieldStrings[i] = NULL;
@@ -240,13 +246,43 @@ HRESULT CAuthentikCredential::GetStringValue(DWORD dwFieldID, LPWSTR* ppwsz)
 
 HRESULT CAuthentikCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
 {
-    // Return default user icon
-    if (dwFieldID == FID_LOGO)
+    HRESULT hr = E_INVALIDARG;
+    
+    if (dwFieldID == FID_LOGO && phbmp)
     {
-        *phbmp = NULL;
-        return S_OK;
+        // Try to load custom icon from DLL resources
+        HICON hIcon = (HICON)LoadImageW(
+            g_hinst,
+            MAKEINTRESOURCEW(IDI_TILE_ICON),
+            IMAGE_ICON,
+            48, 48,  // Size for tile icon
+            LR_DEFAULTCOLOR);
+        
+        if (hIcon)
+        {
+            // Convert icon to bitmap
+            ICONINFO iconInfo;
+            if (GetIconInfo(hIcon, &iconInfo))
+            {
+                *phbmp = iconInfo.hbmColor;
+                if (iconInfo.hbmMask)
+                {
+                    DeleteObject(iconInfo.hbmMask);
+                }
+                hr = S_OK;
+            }
+            DestroyIcon(hIcon);
+        }
+        
+        if (FAILED(hr))
+        {
+            // No custom icon - return NULL to use default
+            *phbmp = NULL;
+            hr = S_OK;
+        }
     }
-    return E_INVALIDARG;
+    
+    return hr;
 }
 
 HRESULT CAuthentikCredential::GetCheckboxValue(DWORD dwFieldID, BOOL* pbChecked, LPWSTR* ppwszLabel)
@@ -423,28 +459,23 @@ HRESULT CAuthentikCredential::_HandleUsernameStep(
     LOG("Response status: %d, message: %S", (int)response.status, response.message.c_str());
 
     if (response.status == AuthStatus::NEED_OTP || 
-        response.status == AuthStatus::SUCCESS)  // Some flows go straight to OTP
+        response.status == AuthStatus::SUCCESS)
     {
         LOG("Transitioning to OTP step");
         
-        // Hide username field, show OTP field
+        // Keep username visible but not editable, show OTP field
         _rgFieldStatePairs[FID_USERNAME].cpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
-        _rgFieldStatePairs[FID_USERNAME].cpfis = CPFIS_NONE;  // No longer focused
+        _rgFieldStatePairs[FID_USERNAME].cpfis = CPFIS_NONE;
         _rgFieldStatePairs[FID_OTP].cpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
         _rgFieldStatePairs[FID_OTP].cpfis = CPFIS_FOCUSED;
 
         // Notify UI of field changes
         if (_pCredentialEvents)
         {
-            // Update username field - make it read-only looking
             _pCredentialEvents->SetFieldInteractiveState(this, FID_USERNAME, CPFIS_NONE);
-            
-            // Show OTP field
             _pCredentialEvents->SetFieldState(this, FID_OTP, CPFS_DISPLAY_IN_SELECTED_TILE);
             _pCredentialEvents->SetFieldInteractiveState(this, FID_OTP, CPFIS_FOCUSED);
-            
-            // Update status text
-            _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Enter your one-time code");
+            _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Enter your verification code");
         }
 
         _currentStep = AuthStep::STEP_OTP;
@@ -455,7 +486,7 @@ HRESULT CAuthentikCredential::_HandleUsernameStep(
     else if (response.status == AuthStatus::ERROR_NETWORK)
     {
         LOG("Network error");
-        SHStrDupW(L"Cannot connect to authentication server", ppwszOptionalStatusText);
+        SHStrDupW(L"Cannot connect to authentication server. Check network.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         return S_FALSE;
@@ -463,7 +494,8 @@ HRESULT CAuthentikCredential::_HandleUsernameStep(
     else if (response.status == AuthStatus::ERROR_SERVER)
     {
         LOG("Server error");
-        SHStrDupW(response.message.c_str(), ppwszOptionalStatusText);
+        std::wstring msg = L"Server error: " + response.message;
+        SHStrDupW(msg.c_str(), ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         return S_FALSE;
@@ -492,7 +524,7 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
     if (otp.empty())
     {
         LOG("OTP is empty");
-        SHStrDupW(L"Please enter your one-time code", ppwszOptionalStatusText);
+        SHStrDupW(L"Please enter your verification code", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         return S_FALSE;
@@ -539,7 +571,7 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
         {
             // OTP validated but no certificate - for testing phase
             LOG("OTP validated but no certificate (testing mode)");
-            SHStrDupW(L"OTP validated! (Certificate issuance not configured)", ppwszOptionalStatusText);
+            SHStrDupW(L"OTP verified! Certificate issuance not yet configured.", ppwszOptionalStatusText);
             *pcpsiOptionalStatusIcon = CPSI_WARNING;
             *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
             
@@ -624,7 +656,7 @@ HRESULT CAuthentikCredential::_PackCertificateCredential(
     pcpcs->cbSerialization = cbPackage;
     
     // Use Kerberos package for PKINIT
-    pcpcs->ulAuthenticationPackage = 0; // Will be set by provider
+    pcpcs->ulAuthenticationPackage = 0;
 
     *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
     *pcpsiOptionalStatusIcon = CPSI_SUCCESS;
