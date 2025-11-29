@@ -1,13 +1,11 @@
 // AuthentikCredentialProvider.h
-// Header for main credential provider - Passwordless version
+// Header for main credential provider - passwordless authentication
 
 #pragma once
 
-#include <credentialprovider.h>
 #include <windows.h>
-#include <strsafe.h>
+#include <credentialprovider.h>
 #include <shlguid.h>
-#include <ntsecapi.h>
 #include "FieldDescriptors.h"
 
 class CAuthentikCredential;
@@ -43,13 +41,8 @@ private:
     HRESULT _GetAuthenticationPackageId();
 
     LONG _cRef;
-    KERB_INTERACTIVE_UNLOCK_LOGON* _pkiulSetSerialization;
-    DWORD _dwSetSerializationCred;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus;
     CAuthentikCredential* _pCredential;
     UINT_PTR _upAdviseContext;
     ULONG _ulAuthPackage;
 };
-
-// Factory function
-HRESULT CAuthentikProvider_CreateInstance(REFIID riid, void** ppv);
