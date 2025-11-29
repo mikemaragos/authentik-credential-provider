@@ -6,9 +6,14 @@
 #include <windows.h>
 #include <wincrypt.h>
 #include <ncrypt.h>
-#include <ntsecapi.h>
+#include <NTSecAPI.h>
 #include <string>
 #include <vector>
+
+// Link required libraries
+#pragma comment(lib, "Crypt32.lib")
+#pragma comment(lib, "NCrypt.lib")
+#pragma comment(lib, "BCrypt.lib")
 
 // Certificate bundle received from Authentik
 struct CertificateBundle
@@ -26,7 +31,7 @@ struct CertificateBundle
     NCRYPT_KEY_HANDLE hKey;
     HCERTSTORE hMemStore;
     
-    CertificateBundle() : pCertContext(nullptr), hKey(0), hMemStore(nullptr), validMinutes(5) {}
+    CertificateBundle() : pCertContext(NULL), hKey(0), hMemStore(NULL), validMinutes(5) {}
     
     // Cleanup method
     void Cleanup()
@@ -39,24 +44,27 @@ struct CertificateBundle
         if (pCertContext)
         {
             CertFreeCertificateContext(pCertContext);
-            pCertContext = nullptr;
+            pCertContext = NULL;
         }
         if (hMemStore)
         {
             CertCloseStore(hMemStore, 0);
-            hMemStore = nullptr;
+            hMemStore = NULL;
         }
         
         // Secure clear sensitive data
-        SecureZeroMemory(&privateKey[0], privateKey.size());
-        privateKey.clear();
+        if (!privateKey.empty())
+        {
+            SecureZeroMemory(&privateKey[0], privateKey.size());
+            privateKey.clear();
+        }
     }
 };
 
 // Smart Card CSP Info structure for KERB_CERTIFICATE_LOGON
 // This mimics what a smart card would provide
 #pragma pack(push, 1)
-typedef struct _KERB_SMARTCARD_CSP_INFO {
+typedef struct _AUTHENTIK_SMARTCARD_CSP_INFO {
     DWORD dwCspInfoLen;
     DWORD MessageType;              // Always 1
     union {
@@ -72,27 +80,23 @@ typedef struct _KERB_SMARTCARD_CSP_INFO {
     // Variable length buffer follows containing null-terminated strings:
     // CardName, ReaderName, ContainerName, CSPName
     WCHAR bBuffer[1];
-} KERB_SMARTCARD_CSP_INFO, *PKERB_SMARTCARD_CSP_INFO;
+} AUTHENTIK_SMARTCARD_CSP_INFO, *PAUTHENTIK_SMARTCARD_CSP_INFO;
 #pragma pack(pop)
 
-// KERB_CERTIFICATE_LOGON structure
-typedef struct _KERB_CERTIFICATE_LOGON {
-    KERB_LOGON_SUBMIT_TYPE MessageType;
-    UNICODE_STRING DomainName;
-    UNICODE_STRING UserName;
-    UNICODE_STRING Pin;
-    ULONG Flags;
-    ULONG CspDataLength;
-    PUCHAR CspData;
-} KERB_CERTIFICATE_LOGON, *PKERB_CERTIFICATE_LOGON;
-
-// Flags for KERB_CERTIFICATE_LOGON
+// Use Windows SDK KERB_CERTIFICATE_LOGON if available, otherwise define our own
+// The SDK version is in NTSecAPI.h on Windows 10+
+#ifndef KERB_CERTIFICATE_LOGON_FLAG_CHECK_DUPLICATES
 #define KERB_CERTIFICATE_LOGON_FLAG_CHECK_DUPLICATES 0x1
-#define KERB_CERTIFICATE_LOGON_FLAG_USE_CERTIFICATE_INFO 0x2
+#endif
 
-// Certificate logon message type
-#define KerbCertificateLogon 13
-#define KerbCertificateUnlockLogon 15
+#ifndef KERB_CERTIFICATE_LOGON_FLAG_USE_CERTIFICATE_INFO
+#define KERB_CERTIFICATE_LOGON_FLAG_USE_CERTIFICATE_INFO 0x2
+#endif
+
+// Certificate logon message type values
+// These are the KERB_LOGON_SUBMIT_TYPE enum values
+#define AUTHENTIK_KerbCertificateLogon 13
+#define AUTHENTIK_KerbCertificateUnlockLogon 15
 
 class CertificateHelper
 {
