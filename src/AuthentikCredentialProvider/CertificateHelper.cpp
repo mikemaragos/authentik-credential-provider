@@ -7,43 +7,16 @@
 #include <bcrypt.h>
 #include <sstream>
 #include <algorithm>
+#include <objbase.h>  // For CoCreateGuid, CoTaskMemAlloc
 
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "NCrypt.lib")
 #pragma comment(lib, "BCrypt.lib")
+#pragma comment(lib, "Ole32.lib")  // For CoCreateGuid
 
 // ============================================================================
-// KSP Integration - Shared Memory Key Storage
+// KSP Integration - Store key in shared memory
 // ============================================================================
-
-// These match the definitions in AuthentikKSP.h
-#define AUTHENTIK_KSP_NAME L"Authentik Key Storage Provider"
-#define AUTHENTIK_SHARED_MEM_NAME L"Global\\AuthentikKSPKeyStore"
-#define AUTHENTIK_SHARED_MEM_SIZE (1024 * 1024)
-#define AUTHENTIK_MUTEX_NAME L"Global\\AuthentikKSPMutex"
-#define AUTHENTIK_KEY_MAGIC 0x4B535041
-
-#pragma pack(push, 1)
-typedef struct _AUTHENTIK_KEY_ENTRY {
-    DWORD dwMagic;
-    DWORD dwFlags;
-    DWORD dwKeySpec;
-    FILETIME ftCreated;
-    FILETIME ftExpires;
-    WCHAR wszContainerName[256];
-    WCHAR wszUserName[256];
-    DWORD cbPrivateKey;
-    DWORD cbCertificate;
-    BYTE rgbData[1];
-} AUTHENTIK_KEY_ENTRY, *PAUTHENTIK_KEY_ENTRY;
-
-typedef struct _AUTHENTIK_KEY_STORE_HEADER {
-    DWORD dwMagic;
-    DWORD dwVersion;
-    DWORD cKeys;
-    DWORD cbTotalSize;
-} AUTHENTIK_KEY_STORE_HEADER, *PAUTHENTIK_KEY_STORE_HEADER;
-#pragma pack(pop)
 
 // Store a key in the KSP's shared memory
 static HRESULT StoreKeyInKSP(
@@ -118,7 +91,7 @@ static HRESULT StoreKeyInKSP(
     }
 
     // Calculate entry size
-    DWORD cbEntry = sizeof(AUTHENTIK_KEY_ENTRY) - 1 + cbPrivateKey + cbCertificate;
+    DWORD cbEntry = AUTHENTIK_KEY_ENTRY_SIZE(cbPrivateKey, cbCertificate);
 
     // Check space
     DWORD cbAvailable = AUTHENTIK_SHARED_MEM_SIZE - pKeyStore->cbTotalSize;
@@ -141,15 +114,18 @@ static HRESULT StoreKeyInKSP(
         GetSystemTimeAsFileTime(&pEntry->ftCreated);
 
         // Calculate expiry
+        DWORD validMins = dwValidityMinutes > 0 ? dwValidityMinutes : AUTHENTIK_DEFAULT_KEY_VALIDITY;
         ULARGE_INTEGER expiry;
         expiry.LowPart = pEntry->ftCreated.dwLowDateTime;
         expiry.HighPart = pEntry->ftCreated.dwHighDateTime;
-        expiry.QuadPart += (ULONGLONG)dwValidityMinutes * 60 * 10000000;
+        expiry.QuadPart += (ULONGLONG)validMins * 60 * 10000000;
         pEntry->ftExpires.dwLowDateTime = expiry.LowPart;
         pEntry->ftExpires.dwHighDateTime = expiry.HighPart;
 
-        wcsncpy_s(pEntry->wszContainerName, wszContainerName, _TRUNCATE);
-        wcsncpy_s(pEntry->wszUserName, wszUserName ? wszUserName : L"", _TRUNCATE);
+        wcsncpy_s(pEntry->wszContainerName, AUTHENTIK_MAX_CONTAINER_NAME,
+                  wszContainerName, _TRUNCATE);
+        wcsncpy_s(pEntry->wszUserName, AUTHENTIK_MAX_USERNAME,
+                  wszUserName ? wszUserName : L"", _TRUNCATE);
 
         pEntry->cbPrivateKey = cbPrivateKey;
         pEntry->cbCertificate = cbCertificate;
@@ -192,9 +168,18 @@ CertificateHelper::CertificateHelper() :
     {
         WCHAR wszGuid[40];
         StringFromGUID2(guid, wszGuid, ARRAYSIZE(wszGuid));
-        _containerName = L"AuthentikPKINIT_";
+        _containerName = AUTHENTIK_KEY_PREFIX;
         _containerName += wszGuid;
         LOG("Container name: %S", _containerName.c_str());
+    }
+    else
+    {
+        // Fallback to tick count
+        _containerName = AUTHENTIK_KEY_PREFIX;
+        WCHAR wszTick[32];
+        _ui64tow_s(GetTickCount64(), wszTick, ARRAYSIZE(wszTick), 16);
+        _containerName += wszTick;
+        LOG("Container name (fallback): %S", _containerName.c_str());
     }
 }
 
@@ -234,7 +219,7 @@ HRESULT CertificateHelper::ParseAuthResponseForCertificate(
     {
         bundle.validMinutes = (DWORD)_wtoi(validStr.c_str());
         if (bundle.validMinutes == 0)
-            bundle.validMinutes = 5;
+            bundle.validMinutes = AUTHENTIK_DEFAULT_KEY_VALIDITY;
     }
 
     if (bundle.HasPfx())
@@ -275,7 +260,7 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
         return hr;
     }
 
-    LOG("PFX decoded: %d bytes", pfxData.size());
+    LOG("PFX decoded: %d bytes", (int)pfxData.size());
 
     // Create PFX blob
     CRYPT_DATA_BLOB pfxBlob;
@@ -283,7 +268,6 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
     pfxBlob.pbData = pfxData.data();
 
     // Import PFX to memory store
-    // Use PKCS12_ALLOW_OVERWRITE_KEY and PKCS12_NO_PERSIST_KEY to keep key ephemeral
     bundle.hMemStore = PFXImportCertStore(
         &pfxBlob,
         bundle.pfxPassword.c_str(),
@@ -341,7 +325,7 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
     }
     else
     {
-        LOG("Private key acquired: handle=0x%p, keySpec=%d", bundle.hKey, dwKeySpec);
+        LOG("Private key acquired: handle=0x%p, keySpec=%d", (void*)bundle.hKey, dwKeySpec);
     }
 
     return S_OK;
@@ -446,9 +430,6 @@ HRESULT CertificateHelper::ImportCertificateForPKINIT(CertificateBundle& bundle)
         }
     }
 
-    // The certificate is now ready in memory
-    // For PKINIT, we need to store the key in the KSP's shared memory
-
     return S_OK;
 }
 
@@ -529,7 +510,7 @@ HRESULT CertificateHelper::BuildCertificateLogon(
         bundle.pCertContext->pbCertEncoded,
         bundle.pCertContext->pbCertEncoded + bundle.pCertContext->cbCertEncoded);
 
-    LOG("Certificate DER: %d bytes", certBlob.size());
+    LOG("Certificate DER: %d bytes", (int)certBlob.size());
 
     // ========================================================================
     // Step 3: Store key in KSP shared memory
@@ -543,7 +524,7 @@ HRESULT CertificateHelper::BuildCertificateLogon(
         certBlob.data(),
         (DWORD)certBlob.size(),
         AT_KEYEXCHANGE,
-        bundle.validMinutes > 0 ? bundle.validMinutes : 60);
+        bundle.validMinutes > 0 ? bundle.validMinutes : AUTHENTIK_DEFAULT_KEY_VALIDITY);
 
     if (FAILED(hr))
     {
@@ -639,7 +620,7 @@ HRESULT CertificateHelper::BuildCertificateLogon(
 
     // CSP Data
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
-    pLogon->CspData = pStringBuffer - pBuffer;  // Offset
+    pLogon->CspData = (PUCHAR)(pStringBuffer - pBuffer);  // Offset
     pStringBuffer += cbCspInfo;
 
     CoTaskMemFree(pCspInfo);
@@ -679,7 +660,6 @@ HRESULT CertificateHelper::BuildCspInfo(
     std::wstring readerName = L"Authentik Virtual Reader";
 
     // Calculate buffer size
-    // Structure + CardName + ReaderName + ContainerName + CSPName
     DWORD cbCardName = (DWORD)((cardName.length() + 1) * sizeof(WCHAR));
     DWORD cbReaderName = (DWORD)((readerName.length() + 1) * sizeof(WCHAR));
     DWORD cbContainerName = (DWORD)((containerName.length() + 1) * sizeof(WCHAR));
@@ -802,7 +782,7 @@ HRESULT CertificateHelper::ImportPrivateKey(
     const std::vector<BYTE>& keyDer,
     NCRYPT_KEY_HANDLE* phKey)
 {
-    LOG("ImportPrivateKey: %d bytes", keyDer.size());
+    LOG("ImportPrivateKey: %d bytes", (int)keyDer.size());
 
     // Open storage provider
     if (_hProvider == 0)
@@ -931,7 +911,7 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
 
     CRYPT_KEY_PROV_INFO keyProvInfo = {0};
     keyProvInfo.pwszContainerName = (LPWSTR)_containerName.c_str();
-    keyProvInfo.pwszProvName = MS_KEY_STORAGE_PROVIDER;
+    keyProvInfo.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
     keyProvInfo.dwProvType = 0;
     keyProvInfo.dwFlags = CRYPT_MACHINE_KEYSET;
     keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
