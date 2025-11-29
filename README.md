@@ -1,120 +1,168 @@
 # Authentik Passwordless Credential Provider for Windows
 
-A Windows Credential Provider that enables **true passwordless domain authentication** using Authentik for identity verification and AD CS certificates for Kerberos PKINIT.
+A Windows Credential Provider that enables passwordless domain authentication using Authentik and PKINIT certificates.
 
-## How It Works
+## Overview
 
-```
-User enters username → Authentik sends OTP challenge → User enters OTP → 
-Authentik requests certificate from AD CS → Windows uses certificate for PKINIT → 
-User logged in (no password!)
-```
-
-## Prerequisites
-
-- Windows 10/11 or Windows Server 2016+ (domain-joined)
-- Authentik server with LDAP integration
-- AD CS (Active Directory Certificate Services) - Enterprise CA
-- Visual Studio 2022 (for building)
-
-## Quick Start
-
-### 1. Build
-
-```powershell
-cd src
-msbuild AuthentikCredentialProvider.sln /p:Configuration=Release /p:Platform=x64
-```
-
-### 2. Install
-
-```powershell
-# Run as Administrator
-copy x64\Release\AuthentikCredentialProvider.dll C:\Windows\System32\
-regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
-```
-
-### 3. Configure
+This credential provider allows Windows domain users to authenticate without passwords by:
+1. Entering their username
+2. Providing an OTP code (TOTP, push notification, etc.)
+3. Receiving a short-lived certificate from AD CS
+4. Authenticating via Kerberos PKINIT
 
 ```
-HKEY_LOCAL_MACHINE\SOFTWARE\AuthentikPasswordlessCP
-├── ServerUrl (REG_SZ) = "authentik.yourdomain.com"
-├── ServerPort (REG_DWORD) = 443
-├── FlowSlug (REG_SZ) = "windows-passwordless"
-├── UseHttps (REG_DWORD) = 1
-├── Domain (REG_SZ) = "YOURDOMAIN"
-├── DomainFQDN (REG_SZ) = "yourdomain.local"
-└── IgnoreCertErrors (REG_DWORD) = 0
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Windows   │────▶│  Authentik  │────▶│   AD CS     │────▶│   Domain    │
+│   Login     │     │  (OTP)      │     │  (Cert)     │     │ Controller  │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
 ```
 
-### 4. Reboot
+## Features
 
-```powershell
-shutdown /r /t 0
-```
+- **Passwordless Authentication** - No password required for domain login
+- **Multi-Factor** - OTP verification through Authentik
+- **Short-Lived Certificates** - 15-minute certificates minimize risk
+- **Standard Kerberos** - Uses native Windows PKINIT
+- **Enterprise Ready** - GPO deployment, logging, recovery options
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [docs/ADCS_SETUP.md](docs/ADCS_SETUP.md) | AD CS certificate template configuration |
-| [docs/AUTHENTIK_SETUP.md](docs/AUTHENTIK_SETUP.md) | Authentik flow configuration |
-| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Detailed installation guide |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Registry settings reference |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [Authentik Setup](docs/AUTHENTIK_SETUP.md) | Configure Authentik server and flows |
+| [Windows Deployment](docs/WINDOWS_DEPLOYMENT.md) | Deploy to Windows workstations |
+| [AD CS Setup](docs/ADCS_SETUP.md) | Configure certificate services |
+| [Architecture](docs/ARCHITECTURE_ADCS.md) | Technical architecture details |
 
-## Architecture
+## Quick Start
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Windows   │     │  Authentik  │     │   AD CS     │     │   Domain    │
-│   Client    │     │   Server    │     │    (CA)     │     │ Controller  │
-└──────┬──────┘     └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-       │                   │                   │                   │
-       │ 1. Username       │                   │                   │
-       │──────────────────►│                   │                   │
-       │                   │                   │                   │
-       │ 2. OTP Challenge  │                   │                   │
-       │◄──────────────────│                   │                   │
-       │                   │                   │                   │
-       │ 3. OTP Code       │                   │                   │
-       │──────────────────►│                   │                   │
-       │                   │                   │                   │
-       │                   │ 4. Cert Request   │                   │
-       │                   │──────────────────►│                   │
-       │                   │                   │                   │
-       │                   │ 5. Certificate    │                   │
-       │                   │◄──────────────────│                   │
-       │                   │                   │                   │
-       │ 6. Cert + Key     │                   │                   │
-       │◄──────────────────│                   │                   │
-       │                   │                   │                   │
-       │ 7. PKINIT ────────────────────────────────────────────────►
-       │                   │                   │                   │
-       │ 8. Kerberos TGT ◄─────────────────────────────────────────│
-       │                   │                   │                   │
-    Logged In!
+### Prerequisites
+
+- Authentik server (2023.x+)
+- Windows Server with AD CS
+- Domain-joined Windows 10/11 workstations
+- Users with TOTP configured in Authentik
+
+### 1. Build the Credential Provider
+
+```powershell
+# Open in Visual Studio 2022
+# Build → Build Solution (Release/x64)
 ```
 
-## Source Files
+### 2. Deploy to Workstation
 
-| File | Description |
-|------|-------------|
-| `AuthentikAPI.cpp/h` | HTTP client with session/cookie management |
-| `AuthentikCredential.cpp/h` | Login UI - username then OTP flow |
-| `AuthentikCredentialProvider.cpp/h` | COM credential provider interface |
-| `CertificateHelper.cpp/h` | Certificate parsing, PKINIT credential packing |
-| `Dll.cpp` | DLL entry point, COM registration |
-| `FieldDescriptors.h` | UI field definitions (username, OTP) |
-| `Logger.h` | Debug logging (use DebugView to monitor) |
+```powershell
+# Copy DLL
+copy x64\Release\AuthentikCredentialProvider.dll C:\Windows\System32\
 
-## Security Notes
+# Register
+regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
 
-- Certificates are short-lived (configurable, default 1 hour)
-- Private keys are ephemeral (never written to disk)
-- Set `IgnoreCertErrors=0` in production
-- Use valid SSL certificates for Authentik
+# Configure
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v ServerUrl /t REG_SZ /d "authentik.company.com" /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v FlowSlug /t REG_SZ /d "windows-passwordless" /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v Domain /t REG_SZ /d "COMPANY" /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v DomainFQDN /t REG_SZ /d "company.local" /f
+```
+
+### 3. Configure Authentik
+
+See [Authentik Setup Guide](docs/AUTHENTIK_SETUP.md) for complete instructions.
+
+### 4. Test
+
+1. Lock workstation (Win + L)
+2. Select "Authentik Passwordless Login"
+3. Enter username → Enter OTP
+4. Authenticate!
+
+## Project Structure
+
+```
+├── src/
+│   └── AuthentikCredentialProvider/
+│       ├── AuthentikAPI.cpp/h         # HTTP client for Authentik
+│       ├── AuthentikCredential.cpp/h  # Credential tile implementation
+│       ├── AuthentikCredentialProvider.cpp/h  # Main provider
+│       ├── CertificateHelper.cpp/h    # Certificate handling
+│       ├── FieldDescriptors.h         # UI field definitions
+│       ├── Dll.cpp                    # DLL entry point
+│       ├── guid.cpp/h                 # COM GUID
+│       └── Logger.h                   # Debug logging
+├── docs/
+│   ├── AUTHENTIK_SETUP.md            # Authentik configuration
+│   ├── WINDOWS_DEPLOYMENT.md         # Windows deployment
+│   ├── ADCS_SETUP.md                 # AD CS configuration
+│   └── ARCHITECTURE_ADCS.md          # Technical architecture
+└── README.md
+```
+
+## Registry Configuration
+
+| Setting | Type | Description |
+|---------|------|-------------|
+| ServerUrl | REG_SZ | Authentik server hostname |
+| ServerPort | REG_DWORD | HTTPS port (default: 443) |
+| FlowSlug | REG_SZ | Authentik flow slug |
+| UseHttps | REG_DWORD | Use HTTPS (1=yes) |
+| Domain | REG_SZ | NetBIOS domain name |
+| DomainFQDN | REG_SZ | Full domain name |
+| IgnoreCertErrors | REG_DWORD | Skip SSL validation (testing only) |
+
+## Troubleshooting
+
+### Debug Logging
+
+Use [DebugView](https://docs.microsoft.com/en-us/sysinternals/downloads/debugview) to see real-time logs:
+1. Run DebugView as Administrator
+2. Enable Capture → Capture Global Win32
+3. Filter for `[AuthentikPwdlessCP]`
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| Tile not showing | Re-register DLL, reboot |
+| HTTP 405 error | Check FlowSlug matches Authentik |
+| SSL errors | Set IgnoreCertErrors=1 for testing |
+| Login fails | Check DebugView for detailed error |
+
+See [Windows Deployment Guide](docs/WINDOWS_DEPLOYMENT.md) for more troubleshooting.
+
+## Security Considerations
+
+- **Testing**: `IgnoreCertErrors=1` is acceptable
+- **Production**: Use valid SSL certificates, set `IgnoreCertErrors=0`
+- **Certificates**: Keep validity short (15 minutes recommended)
+- **Recovery**: Always maintain alternate login method
+
+## Requirements
+
+### Build Requirements
+- Visual Studio 2022
+- Windows SDK 10.0.19041.0+
+- C++ Desktop Development workload
+
+### Runtime Requirements
+- Windows 10/11 or Server 2016+
+- Visual C++ Redistributable 2019+
+- Domain membership
+- Network access to Authentik
 
 ## License
 
-MIT License - See [LICENSE](LICENSE)
+This project is provided for educational and testing purposes.
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
+
+## Acknowledgments
+
+- Microsoft Credential Provider samples
+- Authentik project
+- PrivacyIDEA Credential Provider (inspiration)
