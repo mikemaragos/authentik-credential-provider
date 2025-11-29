@@ -1,6 +1,5 @@
 // AuthentikAPI.h
-// HTTP client for Authentik API communication
-// Supports passwordless authentication with certificate response
+// Header for Authentik API client with session management
 
 #pragma once
 
@@ -10,83 +9,38 @@
 #include <vector>
 #include <map>
 
-// Authentication response types
-enum class AuthResponseType
-{
-    ERROR,
-    NEED_USERNAME,
-    NEED_OTP,
-    SUCCESS_WITH_CERTIFICATE,
-    SUCCESS_REDIRECT
-};
+#pragma comment(lib, "Winhttp.lib")
 
-// OTP challenge types supported
-enum class OTPChallengeType
+// Authentication response status
+enum class AuthStatus
 {
-    TOTP,           // Time-based OTP
-    STATIC,         // Static token
-    PUSH,           // Push notification
-    WEBAUTHN,       // Security key
-    SMS,            // SMS code
-    EMAIL           // Email code
+    SUCCESS,                    // Authentication complete, certificate available
+    NEED_USERNAME,              // Need username (initial state)
+    NEED_OTP,                   // OTP challenge sent, waiting for code
+    FAILED,                     // Authentication failed
+    ERROR_NETWORK,              // Network error
+    ERROR_SERVER                // Server error
 };
 
 // Response structure from Authentik
 struct AuthentikResponse
 {
-    AuthResponseType type;
+    AuthStatus status;
     std::wstring message;
     std::wstring transactionId;
-    std::wstring flowToken;         // Flow execution token for multi-step
     
-    // OTP challenge info
-    bool requiresOTP;
-    OTPChallengeType otpType;
-    std::wstring otpPrompt;
-    
-    // Certificate response (on success)
-    bool hasCertificate;
+    // Certificate data (populated on SUCCESS)
     std::wstring certificatePem;
     std::wstring privateKeyPem;
-    std::vector<std::wstring> caChainPem;
     std::wstring username;
     std::wstring domain;
     std::wstring upn;
     DWORD certValidMinutes;
     
-    // Raw response for debugging
+    // Raw JSON response for additional parsing
     std::wstring rawResponse;
     
-    AuthentikResponse() : 
-        type(AuthResponseType::ERROR),
-        requiresOTP(false),
-        otpType(OTPChallengeType::TOTP),
-        hasCertificate(false),
-        certValidMinutes(5)
-    {}
-    
-    void Clear()
-    {
-        type = AuthResponseType::ERROR;
-        message.clear();
-        transactionId.clear();
-        flowToken.clear();
-        requiresOTP = false;
-        otpPrompt.clear();
-        hasCertificate = false;
-        certificatePem.clear();
-        
-        // Secure clear private key
-        SecureZeroMemory(&privateKeyPem[0], privateKeyPem.size() * sizeof(wchar_t));
-        privateKeyPem.clear();
-        
-        caChainPem.clear();
-        username.clear();
-        domain.clear();
-        upn.clear();
-        certValidMinutes = 5;
-        rawResponse.clear();
-    }
+    AuthentikResponse() : status(AuthStatus::FAILED), certValidMinutes(5) {}
 };
 
 class AuthentikAPI
@@ -95,68 +49,54 @@ public:
     AuthentikAPI();
     ~AuthentikAPI();
 
-    // Initialize and load configuration
-    HRESULT Initialize();
-    
-    // Step 1: Initiate authentication flow with username
-    AuthentikResponse InitiateAuthentication(const std::wstring& username);
-    
-    // Step 2: Submit OTP code
-    AuthentikResponse SubmitOTP(const std::wstring& otp);
-    
-    // Get current flow state
-    const std::wstring& GetCurrentFlowToken() const { return _currentFlowToken; }
-    const std::wstring& GetCurrentUsername() const { return _currentUsername; }
-    
-    // Reset flow state
-    void ResetFlow();
+    // Step 1: Submit username to start authentication flow
+    AuthentikResponse SubmitUsername(const std::wstring& username);
 
-    // Configuration getters
-    const std::wstring& GetServerUrl() const { return _serverUrl; }
-    const std::wstring& GetDomain() const { return _domain; }
-    const std::wstring& GetDomainFQDN() const { return _domainFQDN; }
+    // Step 2: Submit OTP code to complete authentication
+    AuthentikResponse SubmitOTP(const std::wstring& otp);
+
+    // Reset the session (for new authentication attempt)
+    void ResetSession();
+
+    // Get the current username
+    const std::wstring& GetUsername() const { return _currentUsername; }
 
 private:
     // Load configuration from registry
     void _LoadConfiguration();
-    
+
     // Make HTTP request to Authentik
     HRESULT _MakeHttpRequest(
         const std::wstring& method,
         const std::wstring& url,
         const std::wstring& payload,
-        std::wstring& responseBody);
-    
+        std::wstring& responseBody,
+        DWORD& statusCode);
+
     // Parse Authentik API response
-    AuthentikResponse _ParseResponse(const std::wstring& json);
-    
-    // Extract certificate bundle from response
-    HRESULT _ExtractCertificateBundle(
-        const std::wstring& json,
-        AuthentikResponse& response);
-    
-    // Cookie management for session persistence
+    AuthentikResponse _ParseAuthentikResponse(const std::wstring& json);
+
+    // Parse JSON string value
+    std::wstring _ParseJsonString(const std::wstring& json, const std::wstring& key);
+
+    // Save cookies from response
     void _SaveCookies(HINTERNET hRequest);
-    void _ApplyCookies(HINTERNET hRequest);
-    
+
+    // Add cookies to request
+    void _AddCookies(HINTERNET hRequest);
+
     // Configuration
     std::wstring _serverUrl;
     INTERNET_PORT _serverPort;
     std::wstring _flowSlug;
     bool _useHttps;
+    bool _ignoreCertErrors;
     std::wstring _domain;
     std::wstring _domainFQDN;
-    DWORD _certValidMinutes;
-    bool _ignoreCertErrors;     // For testing only!
-    
-    // Session state
-    std::wstring _currentFlowToken;
+
+    // Session management
     std::wstring _currentUsername;
     std::map<std::wstring, std::wstring> _cookies;
-    
-    // HTTP handles
-    HINTERNET _hSession;
+    std::wstring _csrfToken;
+    std::wstring _flowExecutorUrl;
 };
-
-// Factory function
-HRESULT AuthentikAPI_CreateInstance(AuthentikAPI** ppAPI);
