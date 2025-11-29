@@ -14,12 +14,13 @@
 // Authentication status
 enum class AuthStatus
 {
-    SUCCESS,           // Authentication complete
-    NEED_USERNAME,     // Need username input
-    NEED_OTP,          // Need OTP input
-    FAILED,            // Authentication failed
-    ERROR_NETWORK,     // Network error
-    ERROR_SERVER       // Server error
+    SUCCESS,            // Authentication complete
+    NEED_USERNAME,      // Need username input
+    NEED_OTP,           // Need OTP input
+    FAILED,             // Authentication failed
+    ERROR_NETWORK,      // Network error
+    ERROR_SERVER,       // Server error
+    ERROR_CONFIG        // Configuration error
 };
 
 // Response structure
@@ -27,18 +28,17 @@ struct AuthentikResponse
 {
     AuthStatus status;
     std::wstring message;
-    std::wstring transactionId;
+    std::wstring rawResponse;
     
-    // Certificate data (for passwordless)
+    // Certificate data (if provided by server)
     std::wstring certificatePem;
     std::wstring privateKeyPem;
+    int certValidMinutes;
+    
+    // User info
     std::wstring username;
     std::wstring domain;
     std::wstring upn;
-    DWORD certValidMinutes;
-    
-    // Raw response for debugging
-    std::wstring rawResponse;
     
     AuthentikResponse() : status(AuthStatus::FAILED), certValidMinutes(0) {}
 };
@@ -49,13 +49,19 @@ public:
     AuthentikAPI();
     ~AuthentikAPI();
 
-    // Reset session state
+    // Check if configuration is valid
+    bool IsConfigurationValid() const;
+    
+    // Get configuration error message
+    std::wstring GetConfigurationError() const;
+
+    // Reset session (for new authentication attempt)
     void ResetSession();
 
-    // Step 1: Submit username (initiates flow)
+    // Step 1: Submit username - returns NEED_OTP or error
     AuthentikResponse SubmitUsername(const std::wstring& username);
 
-    // Step 2: Submit OTP
+    // Step 2: Submit OTP - returns SUCCESS with certificate or error
     AuthentikResponse SubmitOTP(const std::wstring& otp);
 
 private:
@@ -64,15 +70,11 @@ private:
 
     // Make HTTP request to Authentik
     HRESULT _MakeHttpRequest(
-        const std::wstring& method,
+        const std::wstring& method, 
         const std::wstring& url, 
         const std::wstring& payload, 
         std::wstring& responseBody,
         DWORD& statusCode);
-
-    // Cookie management
-    void _SaveCookies(HINTERNET hRequest);
-    void _AddCookies(HINTERNET hRequest);
 
     // Parse Authentik JSON response
     AuthentikResponse _ParseAuthentikResponse(const std::wstring& json);
@@ -82,6 +84,10 @@ private:
     
     // Escape JSON string
     std::wstring _EscapeJson(const std::wstring& input);
+    
+    // Cookie management
+    void _SaveCookies(HINTERNET hRequest);
+    void _AddCookies(HINTERNET hRequest);
 
     // Configuration
     std::wstring _serverUrl;
@@ -91,7 +97,11 @@ private:
     bool _ignoreCertErrors;
     std::wstring _domain;
     std::wstring _domainFQDN;
-
+    
+    // Configuration validation
+    bool _configurationValid;
+    std::wstring _configurationError;
+    
     // Session state
     std::wstring _currentUsername;
     std::map<std::wstring, std::wstring> _cookies;
