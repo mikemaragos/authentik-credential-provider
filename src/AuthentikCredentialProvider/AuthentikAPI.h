@@ -1,5 +1,5 @@
 // AuthentikAPI.h
-// Header for Authentik API client with session management
+// Header for Authentik API client with session management and certificate issuer integration
 
 #pragma once
 
@@ -30,9 +30,11 @@ struct AuthentikResponse
     std::wstring message;
     std::wstring rawResponse;
     
-    // Certificate data (if provided by server)
+    // Certificate data (from certificate issuer)
     std::wstring certificatePem;
     std::wstring privateKeyPem;
+    std::wstring pfxBase64;      // Base64-encoded PFX with private key
+    std::wstring pfxPassword;    // Password for the PFX
     int certValidMinutes;
     
     // User info
@@ -76,6 +78,20 @@ private:
         std::wstring& responseBody,
         DWORD& statusCode);
 
+    // Make HTTP request to Certificate Issuer
+    HRESULT _MakeCertIssuerRequest(
+        const std::wstring& method, 
+        const std::wstring& url, 
+        const std::wstring& payload, 
+        std::wstring& responseBody,
+        DWORD& statusCode);
+
+    // Request certificate from certificate issuer service
+    AuthentikResponse _RequestCertificate(
+        const std::wstring& username,
+        const std::wstring& upn,
+        const std::wstring& domain);
+
     // Parse Authentik JSON response
     AuthentikResponse _ParseAuthentikResponse(const std::wstring& json);
     
@@ -89,7 +105,7 @@ private:
     void _SaveCookies(HINTERNET hRequest);
     void _AddCookies(HINTERNET hRequest);
 
-    // Configuration
+    // Authentik configuration
     std::wstring _serverUrl;
     INTERNET_PORT _serverPort;
     std::wstring _flowSlug;
@@ -97,6 +113,11 @@ private:
     bool _ignoreCertErrors;
     std::wstring _domain;
     std::wstring _domainFQDN;
+    
+    // Certificate Issuer configuration
+    std::wstring _certIssuerUrl;
+    INTERNET_PORT _certIssuerPort;
+    std::wstring _certIssuerToken;
     
     // Configuration validation
     bool _configurationValid;
