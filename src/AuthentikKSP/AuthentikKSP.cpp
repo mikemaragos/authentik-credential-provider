@@ -23,6 +23,10 @@
         OutputDebugStringA(_buf); \
     } while(0)
 
+// Safe logging that won't crash even if OutputDebugString fails
+#define KSP_LOG_SAFE(msg) \
+    __try { OutputDebugStringA("[AuthentikKSP] " msg "\n"); } __except(EXCEPTION_EXECUTE_HANDLER) { }
+
 // ============================================================================
 // Global State
 // ============================================================================
@@ -31,76 +35,131 @@ static HANDLE g_hSharedMem = NULL;
 static PAUTHENTIK_KEY_STORE_HEADER g_pKeyStore = NULL;
 static HANDLE g_hMutex = NULL;
 static BCRYPT_ALG_HANDLE g_hRsaAlg = NULL;
+static BOOL g_bInitialized = FALSE;
+static BOOL g_bInitFailed = FALSE;
 
 // ============================================================================
 // Internal Helper Functions
 // ============================================================================
 
-static BOOL InitializeKeyStore()
+// Safe initialization with exception handling
+static BOOL InitializeKeyStoreSafe()
 {
-    if (g_pKeyStore != NULL)
+    // Don't retry if we already failed
+    if (g_bInitFailed)
+        return FALSE;
+    
+    // Already initialized
+    if (g_bInitialized && g_pKeyStore != NULL)
         return TRUE;
 
-    KSP_LOG("InitializeKeyStore");
+    KSP_LOG_SAFE("InitializeKeyStore starting");
 
-    // Create or open mutex
-    g_hMutex = CreateMutexW(NULL, FALSE, AUTHENTIK_MUTEX_NAME);
-    if (g_hMutex == NULL)
+    __try
     {
-        KSP_LOG("Failed to create mutex: %d", GetLastError());
+        // Create or open mutex - use Local namespace to avoid boot issues
+        // We'll try Global first, fall back to Local
+        g_hMutex = CreateMutexW(NULL, FALSE, L"Global\\AuthentikKSPMutex");
+        if (g_hMutex == NULL)
+        {
+            // Try Local namespace
+            g_hMutex = CreateMutexW(NULL, FALSE, L"Local\\AuthentikKSPMutex");
+        }
+        
+        if (g_hMutex == NULL)
+        {
+            KSP_LOG("Failed to create mutex: %d", GetLastError());
+            g_bInitFailed = TRUE;
+            return FALSE;
+        }
+
+        // Create or open shared memory
+        g_hSharedMem = CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            NULL,
+            PAGE_READWRITE,
+            0,
+            AUTHENTIK_SHARED_MEM_SIZE,
+            L"Global\\AuthentikKSPKeyStore");
+
+        if (g_hSharedMem == NULL)
+        {
+            // Try Local namespace
+            g_hSharedMem = CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                NULL,
+                PAGE_READWRITE,
+                0,
+                AUTHENTIK_SHARED_MEM_SIZE,
+                L"Local\\AuthentikKSPKeyStore");
+        }
+
+        BOOL bCreated = (GetLastError() != ERROR_ALREADY_EXISTS);
+
+        if (g_hSharedMem == NULL)
+        {
+            KSP_LOG("Failed to create shared memory: %d", GetLastError());
+            g_bInitFailed = TRUE;
+            return FALSE;
+        }
+
+        // Map the view
+        g_pKeyStore = (PAUTHENTIK_KEY_STORE_HEADER)MapViewOfFile(
+            g_hSharedMem,
+            FILE_MAP_ALL_ACCESS,
+            0, 0,
+            AUTHENTIK_SHARED_MEM_SIZE);
+
+        if (g_pKeyStore == NULL)
+        {
+            KSP_LOG("Failed to map shared memory: %d", GetLastError());
+            CloseHandle(g_hSharedMem);
+            g_hSharedMem = NULL;
+            g_bInitFailed = TRUE;
+            return FALSE;
+        }
+
+        // Initialize if newly created
+        if (bCreated)
+        {
+            DWORD waitResult = WaitForSingleObject(g_hMutex, 5000);  // 5 second timeout
+            if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_ABANDONED)
+            {
+                g_pKeyStore->dwMagic = AUTHENTIK_KEY_MAGIC;
+                g_pKeyStore->dwVersion = 1;
+                g_pKeyStore->cKeys = 0;
+                g_pKeyStore->cbTotalSize = sizeof(AUTHENTIK_KEY_STORE_HEADER);
+                ReleaseMutex(g_hMutex);
+                KSP_LOG("Initialized new key store");
+            }
+        }
+        else
+        {
+            KSP_LOG("Opened existing key store with %d keys", g_pKeyStore->cKeys);
+        }
+
+        // Initialize BCrypt RSA algorithm - defer this until actually needed
+        // Don't initialize during OpenProvider as it might crash during boot
+        
+        g_bInitialized = TRUE;
+        KSP_LOG_SAFE("InitializeKeyStore succeeded");
+        return TRUE;
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        KSP_LOG_SAFE("EXCEPTION in InitializeKeyStore");
+        g_bInitFailed = TRUE;
         return FALSE;
     }
+}
 
-    // Create or open shared memory
-    g_hSharedMem = CreateFileMappingW(
-        INVALID_HANDLE_VALUE,
-        NULL,
-        PAGE_READWRITE,
-        0,
-        AUTHENTIK_SHARED_MEM_SIZE,
-        AUTHENTIK_SHARED_MEM_NAME);
-
-    BOOL bCreated = (GetLastError() != ERROR_ALREADY_EXISTS);
-
-    if (g_hSharedMem == NULL)
-    {
-        KSP_LOG("Failed to create shared memory: %d", GetLastError());
-        return FALSE;
-    }
-
-    // Map the view
-    g_pKeyStore = (PAUTHENTIK_KEY_STORE_HEADER)MapViewOfFile(
-        g_hSharedMem,
-        FILE_MAP_ALL_ACCESS,
-        0, 0,
-        AUTHENTIK_SHARED_MEM_SIZE);
-
-    if (g_pKeyStore == NULL)
-    {
-        KSP_LOG("Failed to map shared memory: %d", GetLastError());
-        CloseHandle(g_hSharedMem);
-        g_hSharedMem = NULL;
-        return FALSE;
-    }
-
-    // Initialize if newly created
-    if (bCreated)
-    {
-        WaitForSingleObject(g_hMutex, INFINITE);
-        g_pKeyStore->dwMagic = AUTHENTIK_KEY_MAGIC;
-        g_pKeyStore->dwVersion = 1;
-        g_pKeyStore->cKeys = 0;
-        g_pKeyStore->cbTotalSize = sizeof(AUTHENTIK_KEY_STORE_HEADER);
-        ReleaseMutex(g_hMutex);
-        KSP_LOG("Initialized new key store");
-    }
-    else
-    {
-        KSP_LOG("Opened existing key store with %d keys", g_pKeyStore->cKeys);
-    }
-
-    // Initialize BCrypt RSA algorithm
-    if (g_hRsaAlg == NULL)
+// Initialize RSA algorithm (called lazily when needed)
+static BOOL InitializeRsaAlgorithm()
+{
+    if (g_hRsaAlg != NULL)
+        return TRUE;
+    
+    __try
     {
         NTSTATUS status = BCryptOpenAlgorithmProvider(
             &g_hRsaAlg,
@@ -113,10 +172,21 @@ static BOOL InitializeKeyStore()
             KSP_LOG("Failed to open RSA algorithm: 0x%08x", status);
             return FALSE;
         }
+        return TRUE;
     }
-
-    return TRUE;
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        KSP_LOG_SAFE("EXCEPTION in InitializeRsaAlgorithm");
+        return FALSE;
+    }
 }
+
+// Wrapper for backward compatibility
+static BOOL InitializeKeyStore()
+{
+    return InitializeKeyStoreSafe();
+}
+
 
 // Get pointer to first key entry (after header)
 static PAUTHENTIK_KEY_ENTRY GetFirstKeyEntry()
@@ -307,6 +377,15 @@ SECURITY_STATUS WINAPI AuthentikKSPOpenKey(
            pEntry->cbCertificate);
 
     KSP_LOG("OpenKey: Importing key into BCrypt, %d bytes", pEntry->cbPrivateKey);
+
+    // Ensure RSA algorithm is initialized (lazy init)
+    if (!InitializeRsaAlgorithm())
+    {
+        KSP_LOG("Failed to initialize RSA algorithm");
+        delete pKey;
+        ReleaseMutex(g_hMutex);
+        return NTE_PROVIDER_DLL_FAIL;
+    }
 
     // Import the key into BCrypt for signing operations
     NTSTATUS status = BCryptImportKeyPair(
@@ -1160,3 +1239,4 @@ extern "C" LPCWSTR WINAPI AuthentikKSP_GetProviderName(void)
 {
     return AUTHENTIK_KSP_NAME;
 }
+
