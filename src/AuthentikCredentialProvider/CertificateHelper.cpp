@@ -1,66 +1,207 @@
 // CertificateHelper.cpp
 // Certificate parsing, import, and management for PKINIT authentication
+// Updated to use Authentik KSP for key storage
 
 #include "CertificateHelper.h"
 #include "Logger.h"
-#include <objbase.h>
-#include <shlwapi.h>
 #include <bcrypt.h>
-#include <algorithm>
 #include <sstream>
-#include <new>
+#include <algorithm>
 
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "NCrypt.lib")
 #pragma comment(lib, "BCrypt.lib")
-#pragma comment(lib, "Ole32.lib")
-#pragma comment(lib, "Shlwapi.lib")
 
-// Microsoft Software Key Storage Provider
-static const WCHAR* MS_KEY_STORAGE_PROVIDER_NAME = L"Microsoft Software Key Storage Provider";
+// ============================================================================
+// KSP Integration - Shared Memory Key Storage
+// ============================================================================
 
-// Constructor
+// These match the definitions in AuthentikKSP.h
+#define AUTHENTIK_KSP_NAME L"Authentik Key Storage Provider"
+#define AUTHENTIK_SHARED_MEM_NAME L"Global\\AuthentikKSPKeyStore"
+#define AUTHENTIK_SHARED_MEM_SIZE (1024 * 1024)
+#define AUTHENTIK_MUTEX_NAME L"Global\\AuthentikKSPMutex"
+#define AUTHENTIK_KEY_MAGIC 0x4B535041
+
+#pragma pack(push, 1)
+typedef struct _AUTHENTIK_KEY_ENTRY {
+    DWORD dwMagic;
+    DWORD dwFlags;
+    DWORD dwKeySpec;
+    FILETIME ftCreated;
+    FILETIME ftExpires;
+    WCHAR wszContainerName[256];
+    WCHAR wszUserName[256];
+    DWORD cbPrivateKey;
+    DWORD cbCertificate;
+    BYTE rgbData[1];
+} AUTHENTIK_KEY_ENTRY, *PAUTHENTIK_KEY_ENTRY;
+
+typedef struct _AUTHENTIK_KEY_STORE_HEADER {
+    DWORD dwMagic;
+    DWORD dwVersion;
+    DWORD cKeys;
+    DWORD cbTotalSize;
+} AUTHENTIK_KEY_STORE_HEADER, *PAUTHENTIK_KEY_STORE_HEADER;
+#pragma pack(pop)
+
+// Store a key in the KSP's shared memory
+static HRESULT StoreKeyInKSP(
+    LPCWSTR wszContainerName,
+    LPCWSTR wszUserName,
+    const BYTE* pbPrivateKey,
+    DWORD cbPrivateKey,
+    const BYTE* pbCertificate,
+    DWORD cbCertificate,
+    DWORD dwKeySpec,
+    DWORD dwValidityMinutes)
+{
+    LOG("StoreKeyInKSP: container=%S, keyLen=%d, certLen=%d",
+        wszContainerName, cbPrivateKey, cbCertificate);
+
+    HANDLE hMutex = NULL;
+    HANDLE hSharedMem = NULL;
+    PAUTHENTIK_KEY_STORE_HEADER pKeyStore = NULL;
+    HRESULT hr = E_FAIL;
+
+    // Create/open mutex
+    hMutex = CreateMutexW(NULL, FALSE, AUTHENTIK_MUTEX_NAME);
+    if (hMutex == NULL)
+    {
+        LOG("Failed to create mutex: %d", GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    // Create/open shared memory
+    hSharedMem = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,
+        NULL,
+        PAGE_READWRITE,
+        0,
+        AUTHENTIK_SHARED_MEM_SIZE,
+        AUTHENTIK_SHARED_MEM_NAME);
+
+    BOOL bCreated = (GetLastError() != ERROR_ALREADY_EXISTS);
+
+    if (hSharedMem == NULL)
+    {
+        LOG("Failed to create shared memory: %d", GetLastError());
+        CloseHandle(hMutex);
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    // Map view
+    pKeyStore = (PAUTHENTIK_KEY_STORE_HEADER)MapViewOfFile(
+        hSharedMem,
+        FILE_MAP_ALL_ACCESS,
+        0, 0,
+        AUTHENTIK_SHARED_MEM_SIZE);
+
+    if (pKeyStore == NULL)
+    {
+        LOG("Failed to map shared memory: %d", GetLastError());
+        CloseHandle(hSharedMem);
+        CloseHandle(hMutex);
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    WaitForSingleObject(hMutex, INFINITE);
+
+    // Initialize if new
+    if (bCreated || pKeyStore->dwMagic != AUTHENTIK_KEY_MAGIC)
+    {
+        pKeyStore->dwMagic = AUTHENTIK_KEY_MAGIC;
+        pKeyStore->dwVersion = 1;
+        pKeyStore->cKeys = 0;
+        pKeyStore->cbTotalSize = sizeof(AUTHENTIK_KEY_STORE_HEADER);
+        LOG("Initialized new key store");
+    }
+
+    // Calculate entry size
+    DWORD cbEntry = sizeof(AUTHENTIK_KEY_ENTRY) - 1 + cbPrivateKey + cbCertificate;
+
+    // Check space
+    DWORD cbAvailable = AUTHENTIK_SHARED_MEM_SIZE - pKeyStore->cbTotalSize;
+    if (cbEntry > cbAvailable)
+    {
+        LOG("Not enough space in key store");
+        hr = E_OUTOFMEMORY;
+        goto cleanup;
+    }
+
+    // Add entry
+    {
+        PAUTHENTIK_KEY_ENTRY pEntry = (PAUTHENTIK_KEY_ENTRY)
+            ((PBYTE)pKeyStore + pKeyStore->cbTotalSize);
+
+        pEntry->dwMagic = AUTHENTIK_KEY_MAGIC;
+        pEntry->dwFlags = 0;
+        pEntry->dwKeySpec = dwKeySpec;
+
+        GetSystemTimeAsFileTime(&pEntry->ftCreated);
+
+        // Calculate expiry
+        ULARGE_INTEGER expiry;
+        expiry.LowPart = pEntry->ftCreated.dwLowDateTime;
+        expiry.HighPart = pEntry->ftCreated.dwHighDateTime;
+        expiry.QuadPart += (ULONGLONG)dwValidityMinutes * 60 * 10000000;
+        pEntry->ftExpires.dwLowDateTime = expiry.LowPart;
+        pEntry->ftExpires.dwHighDateTime = expiry.HighPart;
+
+        wcsncpy_s(pEntry->wszContainerName, wszContainerName, _TRUNCATE);
+        wcsncpy_s(pEntry->wszUserName, wszUserName ? wszUserName : L"", _TRUNCATE);
+
+        pEntry->cbPrivateKey = cbPrivateKey;
+        pEntry->cbCertificate = cbCertificate;
+
+        memcpy(pEntry->rgbData, pbPrivateKey, cbPrivateKey);
+        memcpy(pEntry->rgbData + cbPrivateKey, pbCertificate, cbCertificate);
+
+        pKeyStore->cKeys++;
+        pKeyStore->cbTotalSize += cbEntry;
+
+        LOG("Key stored successfully: total keys=%d", pKeyStore->cKeys);
+        hr = S_OK;
+    }
+
+cleanup:
+    ReleaseMutex(hMutex);
+    
+    if (pKeyStore)
+        UnmapViewOfFile(pKeyStore);
+    if (hSharedMem)
+        CloseHandle(hSharedMem);
+    if (hMutex)
+        CloseHandle(hMutex);
+
+    return hr;
+}
+
+// ============================================================================
+// CertificateHelper Implementation
+// ============================================================================
+
 CertificateHelper::CertificateHelper() :
     _hProvider(0)
 {
     LOG("CertificateHelper::Constructor");
-    
-    // Open the key storage provider
-    SECURITY_STATUS status = NCryptOpenStorageProvider(
-        &_hProvider,
-        MS_KEY_STORAGE_PROVIDER_NAME,
-        0);
-    
-    if (status != ERROR_SUCCESS)
-    {
-        LOG("Failed to open key storage provider: 0x%08x", status);
-        _hProvider = 0;
-    }
-    
+
     // Generate unique container name for this session
     GUID guid;
     if (SUCCEEDED(CoCreateGuid(&guid)))
     {
-        WCHAR guidStr[40];
-        StringFromGUID2(guid, guidStr, 40);
+        WCHAR wszGuid[40];
+        StringFromGUID2(guid, wszGuid, ARRAYSIZE(wszGuid));
         _containerName = L"AuthentikPKINIT_";
-        _containerName += guidStr;
+        _containerName += wszGuid;
+        LOG("Container name: %S", _containerName.c_str());
     }
-    else
-    {
-        // Fallback to timestamp-based name
-        _containerName = L"AuthentikPKINIT_";
-        _containerName += std::to_wstring(GetTickCount64());
-    }
-    
-    LOG("Container name: %S", _containerName.c_str());
 }
 
-// Destructor
 CertificateHelper::~CertificateHelper()
 {
     LOG("CertificateHelper::Destructor");
-    
+
     if (_hProvider)
     {
         NCryptFreeObject(_hProvider);
@@ -68,245 +209,94 @@ CertificateHelper::~CertificateHelper()
     }
 }
 
-// Factory function
-HRESULT CertificateHelper_CreateInstance(CertificateHelper** ppHelper)
-{
-    if (!ppHelper)
-        return E_INVALIDARG;
-    
-    *ppHelper = new(std::nothrow) CertificateHelper();
-    return (*ppHelper) ? S_OK : E_OUTOFMEMORY;
-}
-
-// Parse JSON response from Authentik
 HRESULT CertificateHelper::ParseAuthResponseForCertificate(
     const std::wstring& jsonResponse,
     CertificateBundle& bundle)
 {
     LOG("ParseAuthResponseForCertificate");
-    
-    // Parse certificate (PEM format)
+
+    // Look for PFX data first (preferred)
+    bundle.pfxBase64 = ParseJsonString(jsonResponse, L"pfx");
+    bundle.pfxPassword = ParseJsonString(jsonResponse, L"pfx_password");
+
+    // Also parse PEM data if available
     bundle.certificate = ParseJsonStringNarrow(jsonResponse, L"certificate");
-    if (bundle.certificate.empty())
-    {
-        LOG("No certificate in response");
-        return E_FAIL;
-    }
-    
-    // Parse private key (PEM format)
     bundle.privateKey = ParseJsonStringNarrow(jsonResponse, L"private_key");
-    if (bundle.privateKey.empty())
-    {
-        LOG("No private key in response");
-        return E_FAIL;
-    }
-    
+
     // Parse user info
     bundle.username = ParseJsonString(jsonResponse, L"username");
     bundle.domain = ParseJsonString(jsonResponse, L"domain");
     bundle.upn = ParseJsonString(jsonResponse, L"upn");
-    
-    // Parse validity (optional)
+
+    // Parse validity
     std::wstring validStr = ParseJsonString(jsonResponse, L"valid_minutes");
     if (!validStr.empty())
     {
         bundle.validMinutes = (DWORD)_wtoi(validStr.c_str());
+        if (bundle.validMinutes == 0)
+            bundle.validMinutes = 5;
     }
-    
-    LOG("Parsed certificate bundle: user=%S, domain=%S, upn=%S",
-        bundle.username.c_str(), bundle.domain.c_str(), bundle.upn.c_str());
-    
-    return S_OK;
+
+    if (bundle.HasPfx())
+    {
+        LOG("Found PFX data in response");
+        return S_OK;
+    }
+    else if (bundle.HasPem())
+    {
+        LOG("Found PEM data in response");
+        return S_OK;
+    }
+    else
+    {
+        LOG("No certificate data found in response");
+        return E_FAIL;
+    }
 }
 
-// Parse PEM certificate and private key
-HRESULT CertificateHelper::ParseCertificateBundle(CertificateBundle& bundle)
-{
-    LOG("ParseCertificateBundle");
-    
-    HRESULT hr;
-    std::vector<BYTE> certDer;
-    std::vector<BYTE> keyDer;
-    
-    // Convert certificate PEM to DER
-    hr = PemToDer(bundle.certificate, 
-                  "-----BEGIN CERTIFICATE-----",
-                  "-----END CERTIFICATE-----",
-                  certDer);
-    if (FAILED(hr))
-    {
-        LOG("Failed to parse certificate PEM: 0x%08x", hr);
-        return hr;
-    }
-    
-    // Convert private key PEM to DER
-    // Try PKCS#8 format first, then RSA format
-    hr = PemToDer(bundle.privateKey,
-                  "-----BEGIN PRIVATE KEY-----",
-                  "-----END PRIVATE KEY-----",
-                  keyDer);
-    if (FAILED(hr))
-    {
-        // Try RSA format
-        hr = PemToDer(bundle.privateKey,
-                      "-----BEGIN RSA PRIVATE KEY-----",
-                      "-----END RSA PRIVATE KEY-----",
-                      keyDer);
-        if (FAILED(hr))
-        {
-            LOG("Failed to parse private key PEM: 0x%08x", hr);
-            return hr;
-        }
-    }
-    
-    LOG("Parsed PEM - Cert: %d bytes, Key: %d bytes", (int)certDer.size(), (int)keyDer.size());
-    
-    // Create in-memory certificate store
-    bundle.hMemStore = CertOpenStore(
-        CERT_STORE_PROV_MEMORY,
-        0,
-        0,
-        CERT_STORE_CREATE_NEW_FLAG,
-        NULL);
-    
-    if (!bundle.hMemStore)
-    {
-        LOG("Failed to create memory store: %d", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-    
-    // Add certificate to store
-    if (!CertAddEncodedCertificateToStore(
-        bundle.hMemStore,
-        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-        certDer.data(),
-        (DWORD)certDer.size(),
-        CERT_STORE_ADD_NEW,
-        &bundle.pCertContext))
-    {
-        LOG("Failed to add certificate to store: %d", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-    
-    LOG("Certificate added to memory store");
-    
-    // Import private key
-    hr = ImportPrivateKey(keyDer, &bundle.hKey);
-    if (FAILED(hr))
-    {
-        LOG("Failed to import private key: 0x%08x", hr);
-        return hr;
-    }
-    
-    // Associate key with certificate
-    hr = AssociateKeyWithCert(bundle.pCertContext, bundle.hKey);
-    if (FAILED(hr))
-    {
-        LOG("Failed to associate key with certificate: 0x%08x", hr);
-        return hr;
-    }
-    
-    LOG("Certificate bundle parsed successfully");
-    return S_OK;
-}
-
-// Import certificate for PKINIT
-HRESULT CertificateHelper::ImportCertificateForPKINIT(CertificateBundle& bundle)
-{
-    LOG("ImportCertificateForPKINIT");
-    
-    // First parse the bundle if not already done
-    if (!bundle.pCertContext)
-    {
-        HRESULT hr;
-        
-        // Check if we have PFX data (preferred)
-        if (bundle.HasPfx())
-        {
-            LOG("Using PFX format for certificate import");
-            hr = ParsePfxBundle(bundle);
-        }
-        else if (bundle.HasPem())
-        {
-            LOG("Using PEM format for certificate import");
-            hr = ParseCertificateBundle(bundle);
-        }
-        else
-        {
-            LOG("No certificate data available");
-            return E_INVALIDARG;
-        }
-        
-        if (FAILED(hr))
-        {
-            return hr;
-        }
-    }
-    
-    // The certificate is already in our memory store with key associated
-    // For PKINIT, Windows will use the key through the certificate context
-    
-    LOG("Certificate ready for PKINIT");
-    return S_OK;
-}
-
-// Parse PFX (PKCS#12) bundle
 HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
 {
     LOG("ParsePfxBundle");
-    
+
     if (!bundle.HasPfx())
     {
-        LOG("No PFX data in bundle");
+        LOG("No PFX data available");
         return E_INVALIDARG;
     }
-    
+
+    HRESULT hr = E_FAIL;
+
     // Decode base64 PFX
     std::vector<BYTE> pfxData;
-    HRESULT hr = Base64Decode(bundle.pfxBase64, pfxData);
+    hr = Base64Decode(bundle.pfxBase64, pfxData);
     if (FAILED(hr))
     {
         LOG("Failed to decode PFX base64: 0x%08x", hr);
         return hr;
     }
-    
-    LOG("Decoded PFX: %d bytes", (int)pfxData.size());
-    
-    // Create CRYPT_DATA_BLOB for PFX
+
+    LOG("PFX decoded: %d bytes", pfxData.size());
+
+    // Create PFX blob
     CRYPT_DATA_BLOB pfxBlob;
-    pfxBlob.pbData = pfxData.data();
     pfxBlob.cbData = (DWORD)pfxData.size();
-    
-    // Import the PFX into a temporary certificate store
-    // PKCS12_ALLOW_OVERWRITE_KEY - allow overwriting existing keys
-    // PKCS12_NO_PERSIST_KEY - don't persist the key
-    // CRYPT_EXPORTABLE - allow exporting the key (needed for PKINIT)
+    pfxBlob.pbData = pfxData.data();
+
+    // Import PFX to memory store
+    // Use PKCS12_ALLOW_OVERWRITE_KEY and PKCS12_NO_PERSIST_KEY to keep key ephemeral
     bundle.hMemStore = PFXImportCertStore(
         &pfxBlob,
         bundle.pfxPassword.c_str(),
         CRYPT_EXPORTABLE | PKCS12_NO_PERSIST_KEY | PKCS12_ALLOW_OVERWRITE_KEY);
-    
-    if (!bundle.hMemStore)
+
+    if (bundle.hMemStore == NULL)
     {
-        DWORD err = GetLastError();
-        LOG("PFXImportCertStore failed: %d (0x%08x)", err, err);
-        
-        // Try without some flags for compatibility
-        bundle.hMemStore = PFXImportCertStore(
-            &pfxBlob,
-            bundle.pfxPassword.c_str(),
-            CRYPT_EXPORTABLE);
-        
-        if (!bundle.hMemStore)
-        {
-            err = GetLastError();
-            LOG("PFXImportCertStore retry failed: %d (0x%08x)", err, err);
-            return HRESULT_FROM_WIN32(err);
-        }
+        LOG("PFXImportCertStore failed: %d", GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
     }
-    
+
     LOG("PFX imported to memory store");
-    
+
     // Find the certificate with a private key
     bundle.pCertContext = CertFindCertificateInStore(
         bundle.hMemStore,
@@ -315,281 +305,447 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
         CERT_FIND_HAS_PRIVATE_KEY,
         NULL,
         NULL);
-    
-    if (!bundle.pCertContext)
+
+    if (bundle.pCertContext == NULL)
     {
-        // Try to find any certificate
+        // Try finding any certificate
         bundle.pCertContext = CertEnumCertificatesInStore(bundle.hMemStore, NULL);
-        if (!bundle.pCertContext)
-        {
-            LOG("No certificate found in PFX");
-            return E_FAIL;
-        }
-        LOG("Found certificate (without CERT_FIND_HAS_PRIVATE_KEY)");
     }
-    else
+
+    if (bundle.pCertContext == NULL)
     {
-        LOG("Found certificate with private key");
+        LOG("No certificate found in PFX");
+        return E_FAIL;
     }
-    
-    // Verify the certificate has an associated private key
-    DWORD keySpec = 0;
-    BOOL fCallerFreeProv = FALSE;
-    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE hCryptProv = 0;
-    
+
+    // Log certificate subject
+    WCHAR szSubject[256] = {0};
+    CertGetNameStringW(bundle.pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+        0, NULL, szSubject, ARRAYSIZE(szSubject));
+    LOG("Certificate subject: %S", szSubject);
+
+    // Get the private key handle
+    DWORD dwKeySpec = 0;
+    BOOL bCallerFreeKey = FALSE;
+
     if (!CryptAcquireCertificatePrivateKey(
         bundle.pCertContext,
-        CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
+        CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
         NULL,
-        &hCryptProv,
-        &keySpec,
-        &fCallerFreeProv))
+        &bundle.hKey,
+        &dwKeySpec,
+        &bCallerFreeKey))
     {
-        LOG("WARNING: CryptAcquireCertificatePrivateKey failed: %d", GetLastError());
-        // Continue anyway - the key might still work through the PFX import
+        LOG("CryptAcquireCertificatePrivateKey failed: %d", GetLastError());
+        // Continue anyway - we might be able to export and reimport
     }
     else
     {
-        LOG("Private key acquired: keySpec=%d, isNCrypt=%d", 
-            keySpec, (keySpec == CERT_NCRYPT_KEY_SPEC) ? 1 : 0);
-        
-        if (keySpec == CERT_NCRYPT_KEY_SPEC)
-        {
-            bundle.hKey = hCryptProv;
-        }
-        else if (fCallerFreeProv)
-        {
-            // Legacy CAPI key - release it
-            CryptReleaseContext(hCryptProv, 0);
-        }
+        LOG("Private key acquired: handle=0x%p, keySpec=%d", bundle.hKey, dwKeySpec);
     }
-    
-    // Log certificate info
-    WCHAR subjectName[256] = {0};
-    CertGetNameStringW(bundle.pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, subjectName, 256);
-    LOG("Certificate subject: %S", subjectName);
-    
-    LOG("PFX bundle parsed successfully");
+
     return S_OK;
 }
 
-// Base64 decode
-HRESULT CertificateHelper::Base64Decode(
-    const std::wstring& base64,
-    std::vector<BYTE>& decoded)
+HRESULT CertificateHelper::ParseCertificateBundle(CertificateBundle& bundle)
 {
-    if (base64.empty())
+    LOG("ParseCertificateBundle");
+
+    // Prefer PFX if available
+    if (bundle.HasPfx())
+    {
+        return ParsePfxBundle(bundle);
+    }
+
+    // Fall back to PEM
+    if (!bundle.HasPem())
+    {
+        LOG("No certificate data available");
         return E_INVALIDARG;
-    
-    // First call to get required size
-    DWORD cbDecoded = 0;
-    if (!CryptStringToBinaryW(
-        base64.c_str(),
-        (DWORD)base64.length(),
-        CRYPT_STRING_BASE64,
-        NULL,
-        &cbDecoded,
-        NULL,
-        NULL))
+    }
+
+    HRESULT hr = E_FAIL;
+
+    // Convert certificate PEM to DER
+    std::vector<BYTE> certDer;
+    hr = PemToDer(bundle.certificate,
+        "-----BEGIN CERTIFICATE-----",
+        "-----END CERTIFICATE-----",
+        certDer);
+
+    if (FAILED(hr))
     {
-        LOG("CryptStringToBinaryW (size) failed: %d", GetLastError());
+        LOG("Failed to convert certificate PEM to DER: 0x%08x", hr);
+        return hr;
+    }
+
+    // Create certificate context
+    bundle.pCertContext = CertCreateCertificateContext(
+        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+        certDer.data(),
+        (DWORD)certDer.size());
+
+    if (bundle.pCertContext == NULL)
+    {
+        LOG("CertCreateCertificateContext failed: %d", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
-    
-    // Allocate buffer
-    decoded.resize(cbDecoded);
-    
-    // Second call to actually decode
-    if (!CryptStringToBinaryW(
-        base64.c_str(),
-        (DWORD)base64.length(),
-        CRYPT_STRING_BASE64,
-        decoded.data(),
-        &cbDecoded,
-        NULL,
-        NULL))
+
+    // Convert private key PEM to DER
+    std::vector<BYTE> keyDer;
+    hr = PemToDer(bundle.privateKey,
+        "-----BEGIN PRIVATE KEY-----",
+        "-----END PRIVATE KEY-----",
+        keyDer);
+
+    if (FAILED(hr))
     {
-        LOG("CryptStringToBinaryW (decode) failed: %d", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
+        // Try RSA PRIVATE KEY format
+        hr = PemToDer(bundle.privateKey,
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----END RSA PRIVATE KEY-----",
+            keyDer);
     }
-    
-    decoded.resize(cbDecoded);
+
+    if (FAILED(hr))
+    {
+        LOG("Failed to convert private key PEM to DER: 0x%08x", hr);
+        return hr;
+    }
+
+    // Import private key
+    hr = ImportPrivateKey(keyDer, &bundle.hKey);
+    if (FAILED(hr))
+    {
+        LOG("Failed to import private key: 0x%08x", hr);
+        return hr;
+    }
+
+    // Associate key with certificate
+    hr = AssociateKeyWithCert(bundle.pCertContext, bundle.hKey);
+    if (FAILED(hr))
+    {
+        LOG("Failed to associate key with certificate: 0x%08x", hr);
+        // Continue anyway - might still work
+    }
+
     return S_OK;
 }
 
-// Build KERB_CERTIFICATE_LOGON structure
+HRESULT CertificateHelper::ImportCertificateForPKINIT(CertificateBundle& bundle)
+{
+    LOG("ImportCertificateForPKINIT");
+
+    // First parse the bundle if not already done
+    if (bundle.pCertContext == NULL)
+    {
+        HRESULT hr = ParseCertificateBundle(bundle);
+        if (FAILED(hr))
+        {
+            return hr;
+        }
+    }
+
+    // The certificate is now ready in memory
+    // For PKINIT, we need to store the key in the KSP's shared memory
+
+    return S_OK;
+}
+
 HRESULT CertificateHelper::BuildCertificateLogon(
     const CertificateBundle& bundle,
     BYTE** ppPackage,
     DWORD* pcbPackage)
 {
-    LOG("BuildCertificateLogon: user=%S, domain=%S", 
-        bundle.username.c_str(), bundle.domain.c_str());
-    
-    if (!ppPackage || !pcbPackage)
+    LOG("BuildCertificateLogon - Using Authentik KSP");
+
+    if (ppPackage == NULL || pcbPackage == NULL)
         return E_INVALIDARG;
-    
-    HRESULT hr;
-    
-    // Build CSP info structure
+
+    if (bundle.pCertContext == NULL)
+    {
+        LOG("No certificate context");
+        return E_INVALIDARG;
+    }
+
+    HRESULT hr = E_FAIL;
+
+    // ========================================================================
+    // Step 1: Export the private key as BCRYPT_RSAPRIVATE_BLOB
+    // ========================================================================
+
+    std::vector<BYTE> privateKeyBlob;
+
+    if (bundle.hKey)
+    {
+        // Export from NCrypt handle
+        DWORD cbKeyBlob = 0;
+        SECURITY_STATUS status = NCryptExportKey(
+            bundle.hKey,
+            0,
+            BCRYPT_RSAPRIVATE_BLOB,
+            NULL,
+            NULL,
+            0,
+            &cbKeyBlob,
+            0);
+
+        if (status == ERROR_SUCCESS && cbKeyBlob > 0)
+        {
+            privateKeyBlob.resize(cbKeyBlob);
+            status = NCryptExportKey(
+                bundle.hKey,
+                0,
+                BCRYPT_RSAPRIVATE_BLOB,
+                NULL,
+                privateKeyBlob.data(),
+                cbKeyBlob,
+                &cbKeyBlob,
+                0);
+
+            if (status != ERROR_SUCCESS)
+            {
+                LOG("NCryptExportKey failed: 0x%08x", status);
+                privateKeyBlob.clear();
+            }
+            else
+            {
+                LOG("Exported private key: %d bytes", cbKeyBlob);
+            }
+        }
+    }
+
+    if (privateKeyBlob.empty())
+    {
+        LOG("Failed to export private key blob");
+        return E_FAIL;
+    }
+
+    // ========================================================================
+    // Step 2: Get certificate as DER blob
+    // ========================================================================
+
+    std::vector<BYTE> certBlob(
+        bundle.pCertContext->pbCertEncoded,
+        bundle.pCertContext->pbCertEncoded + bundle.pCertContext->cbCertEncoded);
+
+    LOG("Certificate DER: %d bytes", certBlob.size());
+
+    // ========================================================================
+    // Step 3: Store key in KSP shared memory
+    // ========================================================================
+
+    hr = StoreKeyInKSP(
+        _containerName.c_str(),
+        bundle.username.c_str(),
+        privateKeyBlob.data(),
+        (DWORD)privateKeyBlob.size(),
+        certBlob.data(),
+        (DWORD)certBlob.size(),
+        AT_KEYEXCHANGE,
+        bundle.validMinutes > 0 ? bundle.validMinutes : 60);
+
+    if (FAILED(hr))
+    {
+        LOG("Failed to store key in KSP: 0x%08x", hr);
+        return hr;
+    }
+
+    LOG("Key stored in KSP shared memory");
+
+    // ========================================================================
+    // Step 4: Build CSP Info structure
+    // ========================================================================
+
     BYTE* pCspInfo = NULL;
     DWORD cbCspInfo = 0;
-    
-    hr = BuildCspInfo(_containerName, MS_KEY_STORAGE_PROVIDER_NAME, &pCspInfo, &cbCspInfo);
+
+    hr = BuildCspInfo(
+        _containerName,
+        AUTHENTIK_KSP_NAME,
+        &pCspInfo,
+        &cbCspInfo);
+
     if (FAILED(hr))
     {
         LOG("Failed to build CSP info: 0x%08x", hr);
         return hr;
     }
-    
+
+    LOG("CSP Info built: %d bytes", cbCspInfo);
+
+    // ========================================================================
+    // Step 5: Build KERB_CERTIFICATE_LOGON structure
+    // ========================================================================
+
     // Calculate sizes
-    DWORD cbDomain = (DWORD)((bundle.domain.length() + 1) * sizeof(WCHAR));
-    DWORD cbUsername = (DWORD)((bundle.username.length() + 1) * sizeof(WCHAR));
-    DWORD cbPin = sizeof(WCHAR); // Empty pin (just null terminator)
-    
-    // Size of base structure (approximation for x64)
-    DWORD cbStructure = 64; // Conservative estimate
-    DWORD cbTotal = cbStructure + cbDomain + cbUsername + cbPin + cbCspInfo;
-    
-    LOG("Building certificate logon - Structure: %d, Domain: %d, User: %d, CSP: %d, Total: %d",
-        cbStructure, cbDomain, cbUsername, cbCspInfo, cbTotal);
-    
+    std::wstring domain = bundle.domain.empty() ? L"" : bundle.domain;
+    std::wstring username = bundle.username.empty() ? L"" : bundle.username;
+    std::wstring pin = L"";  // No PIN needed - OTP was already validated
+
+    DWORD cbDomain = (DWORD)((domain.length() + 1) * sizeof(WCHAR));
+    DWORD cbUsername = (DWORD)((username.length() + 1) * sizeof(WCHAR));
+    DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
+
+    // Total size = structure + strings + CSP info
+    DWORD cbTotal = sizeof(KERB_CERTIFICATE_LOGON) + cbDomain + cbUsername + cbPin + cbCspInfo;
+
+    LOG("Building KERB_CERTIFICATE_LOGON: total=%d bytes", cbTotal);
+
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
-    if (!pBuffer)
+    if (pBuffer == NULL)
     {
         CoTaskMemFree(pCspInfo);
         return E_OUTOFMEMORY;
     }
-    
+
     ZeroMemory(pBuffer, cbTotal);
-    
-    // Set message type at offset 0
-    *((DWORD*)pBuffer) = AUTHENTIK_KerbCertificateLogon; // 13 = KerbCertificateLogon
-    
-    // String data starts after the fixed structure
-    BYTE* pStringBuffer = pBuffer + cbStructure;
-    
-    // Copy domain string
-    memcpy(pStringBuffer, bundle.domain.c_str(), cbDomain);
-    // Set DomainName UNICODE_STRING (offset 8 on x64)
-    UNICODE_STRING* pDomain = (UNICODE_STRING*)(pBuffer + 8);
-    pDomain->Length = (USHORT)(bundle.domain.length() * sizeof(WCHAR));
-    pDomain->MaximumLength = (USHORT)cbDomain;
-    pDomain->Buffer = (PWSTR)pStringBuffer;
-    pStringBuffer += cbDomain;
-    
-    // Copy username string
-    memcpy(pStringBuffer, bundle.username.c_str(), cbUsername);
-    // Set UserName UNICODE_STRING (offset 24 on x64)
-    UNICODE_STRING* pUser = (UNICODE_STRING*)(pBuffer + 24);
-    pUser->Length = (USHORT)(bundle.username.length() * sizeof(WCHAR));
-    pUser->MaximumLength = (USHORT)cbUsername;
-    pUser->Buffer = (PWSTR)pStringBuffer;
-    pStringBuffer += cbUsername;
-    
-    // Pin is empty
-    *pStringBuffer = L'\0';
-    UNICODE_STRING* pPin = (UNICODE_STRING*)(pBuffer + 40);
-    pPin->Length = 0;
-    pPin->MaximumLength = (USHORT)cbPin;
-    pPin->Buffer = (PWSTR)pStringBuffer;
+
+    // Fill structure
+    KERB_CERTIFICATE_LOGON* pLogon = (KERB_CERTIFICATE_LOGON*)pBuffer;
+    pLogon->MessageType = (KERB_LOGON_SUBMIT_TYPE)AUTHENTIK_KerbCertificateLogon;
+    pLogon->Flags = 0;
+    pLogon->CspDataLength = cbCspInfo;
+
+    // String buffer starts after structure
+    BYTE* pStringBuffer = pBuffer + sizeof(KERB_CERTIFICATE_LOGON);
+
+    // Domain name
+    if (!domain.empty())
+    {
+        memcpy(pStringBuffer, domain.c_str(), cbDomain);
+        pLogon->DomainName.Length = (USHORT)(domain.length() * sizeof(WCHAR));
+        pLogon->DomainName.MaximumLength = (USHORT)cbDomain;
+        pLogon->DomainName.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // Offset from base
+        pStringBuffer += cbDomain;
+    }
+
+    // User name
+    if (!username.empty())
+    {
+        memcpy(pStringBuffer, username.c_str(), cbUsername);
+        pLogon->UserName.Length = (USHORT)(username.length() * sizeof(WCHAR));
+        pLogon->UserName.MaximumLength = (USHORT)cbUsername;
+        pLogon->UserName.Buffer = (PWSTR)(pStringBuffer - pBuffer);
+        pStringBuffer += cbUsername;
+    }
+
+    // PIN (empty)
+    pLogon->Pin.Length = 0;
+    pLogon->Pin.MaximumLength = (USHORT)cbPin;
+    pLogon->Pin.Buffer = (PWSTR)(pStringBuffer - pBuffer);
     pStringBuffer += cbPin;
-    
-    // Set Flags (offset 56)
-    *((ULONG*)(pBuffer + 56)) = KERB_CERTIFICATE_LOGON_FLAG_CHECK_DUPLICATES;
-    
-    // Set CspDataLength (offset 60)
-    *((ULONG*)(pBuffer + 60)) = cbCspInfo;
-    
-    // Copy CSP data
+
+    // CSP Data
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
-    
+    pLogon->CspData = pStringBuffer - pBuffer;  // Offset
+    pStringBuffer += cbCspInfo;
+
     CoTaskMemFree(pCspInfo);
-    
+
+    // Verify we used the expected amount
+    DWORD cbUsed = (DWORD)(pStringBuffer - pBuffer);
+    if (cbUsed != cbTotal)
+    {
+        LOG("WARNING: Buffer size mismatch - expected %d, used %d", cbTotal, cbUsed);
+    }
+
     *ppPackage = pBuffer;
     *pcbPackage = cbTotal;
-    
-    LOG("Certificate logon structure built: %d bytes", cbTotal);
-    
+
+    LOG("KERB_CERTIFICATE_LOGON built successfully: %d bytes", cbTotal);
+
+    // Clear sensitive data
+    SecureZeroMemory(privateKeyBlob.data(), privateKeyBlob.size());
+
     return S_OK;
 }
 
-// Build CSP Info structure
 HRESULT CertificateHelper::BuildCspInfo(
     const std::wstring& containerName,
     const std::wstring& providerName,
     BYTE** ppCspInfo,
     DWORD* pcbCspInfo)
 {
-    LOG("BuildCspInfo: container=%S, provider=%S", 
+    LOG("BuildCspInfo: container=%S, provider=%S",
         containerName.c_str(), providerName.c_str());
-    
-    if (!ppCspInfo || !pcbCspInfo)
+
+    if (ppCspInfo == NULL || pcbCspInfo == NULL)
         return E_INVALIDARG;
-    
-    // Calculate sizes for strings (null-terminated wide strings)
-    DWORD cbCardName = sizeof(WCHAR);  // Empty card name
-    DWORD cbReaderName = sizeof(WCHAR); // Empty reader name
+
+    // String values
+    std::wstring cardName = L"Authentik Virtual Card";
+    std::wstring readerName = L"Authentik Virtual Reader";
+
+    // Calculate buffer size
+    // Structure + CardName + ReaderName + ContainerName + CSPName
+    DWORD cbCardName = (DWORD)((cardName.length() + 1) * sizeof(WCHAR));
+    DWORD cbReaderName = (DWORD)((readerName.length() + 1) * sizeof(WCHAR));
     DWORD cbContainerName = (DWORD)((containerName.length() + 1) * sizeof(WCHAR));
     DWORD cbProviderName = (DWORD)((providerName.length() + 1) * sizeof(WCHAR));
-    
-    // Calculate total size
-    DWORD cbStrings = cbCardName + cbReaderName + cbContainerName + cbProviderName;
-    DWORD cbTotal = sizeof(AUTHENTIK_SMARTCARD_CSP_INFO) - sizeof(WCHAR) + cbStrings;
-    
+
+    DWORD cbTotal = sizeof(AUTHENTIK_SMARTCARD_CSP_INFO) - sizeof(WCHAR) +
+                    cbCardName + cbReaderName + cbContainerName + cbProviderName;
+
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
-    if (!pBuffer)
+    if (pBuffer == NULL)
         return E_OUTOFMEMORY;
-    
+
     ZeroMemory(pBuffer, cbTotal);
-    
-    AUTHENTIK_SMARTCARD_CSP_INFO* pCspInfo = (AUTHENTIK_SMARTCARD_CSP_INFO*)pBuffer;
-    
+
+    PAUTHENTIK_SMARTCARD_CSP_INFO pCspInfo = (PAUTHENTIK_SMARTCARD_CSP_INFO)pBuffer;
+
     // Fill structure
     pCspInfo->dwCspInfoLen = cbTotal;
     pCspInfo->MessageType = 1;
+    pCspInfo->ContextInformation = NULL;
     pCspInfo->flags = 0;
     pCspInfo->KeySpec = AT_KEYEXCHANGE;
-    
-    // String offsets are relative to start of bBuffer
+
+    // Calculate offsets (from start of bBuffer)
     DWORD offset = 0;
-    
-    // Card name (empty)
+
+    // Card name
     pCspInfo->nCardNameOffset = offset;
-    pCspInfo->bBuffer[offset / sizeof(WCHAR)] = L'\0';
+    memcpy(&pCspInfo->bBuffer[offset / sizeof(WCHAR)], cardName.c_str(), cbCardName);
     offset += cbCardName;
-    
-    // Reader name (empty)
+
+    // Reader name
     pCspInfo->nReaderNameOffset = offset;
-    *((WCHAR*)((BYTE*)pCspInfo->bBuffer + offset)) = L'\0';
+    memcpy((BYTE*)pCspInfo->bBuffer + offset, readerName.c_str(), cbReaderName);
     offset += cbReaderName;
-    
+
     // Container name
     pCspInfo->nContainerNameOffset = offset;
     memcpy((BYTE*)pCspInfo->bBuffer + offset, containerName.c_str(), cbContainerName);
     offset += cbContainerName;
-    
-    // CSP/Provider name
+
+    // CSP/KSP name
     pCspInfo->nCSPNameOffset = offset;
     memcpy((BYTE*)pCspInfo->bBuffer + offset, providerName.c_str(), cbProviderName);
-    
+
     *ppCspInfo = pBuffer;
     *pcbCspInfo = cbTotal;
-    
-    LOG("CSP info built: %d bytes", cbTotal);
-    
+
+    LOG("CSP Info built: %d bytes, offsets: card=%d, reader=%d, container=%d, csp=%d",
+        cbTotal, pCspInfo->nCardNameOffset, pCspInfo->nReaderNameOffset,
+        pCspInfo->nContainerNameOffset, pCspInfo->nCSPNameOffset);
+
     return S_OK;
 }
 
-// Clean up certificate handles
 void CertificateHelper::CleanupCertificate(CertificateBundle& bundle)
 {
+    LOG("CleanupCertificate");
     bundle.Cleanup();
 }
 
-// Convert PEM to DER
+// ============================================================================
+// Private Helper Methods
+// ============================================================================
+
 HRESULT CertificateHelper::PemToDer(
     const std::string& pem,
     const char* pemHeader,
@@ -598,77 +754,76 @@ HRESULT CertificateHelper::PemToDer(
 {
     // Find header and footer
     size_t headerPos = pem.find(pemHeader);
-    size_t footerPos = pem.find(pemFooter);
-    
-    if (headerPos == std::string::npos || footerPos == std::string::npos)
-    {
-        LOG("PEM header/footer not found");
+    if (headerPos == std::string::npos)
         return E_INVALIDARG;
-    }
-    
+
+    size_t footerPos = pem.find(pemFooter);
+    if (footerPos == std::string::npos)
+        return E_INVALIDARG;
+
     // Extract base64 content
-    size_t contentStart = headerPos + strlen(pemHeader);
-    std::string base64Content = pem.substr(contentStart, footerPos - contentStart);
-    
+    size_t startPos = headerPos + strlen(pemHeader);
+    std::string base64Content = pem.substr(startPos, footerPos - startPos);
+
     // Remove whitespace
     base64Content.erase(
-        std::remove_if(base64Content.begin(), base64Content.end(), 
-                       [](char c) { return c == '\n' || c == '\r' || c == ' '; }),
+        std::remove_if(base64Content.begin(), base64Content.end(), ::isspace),
         base64Content.end());
-    
+
     // Decode base64
-    DWORD cbBinary = 0;
+    DWORD cbDecoded = 0;
     if (!CryptStringToBinaryA(
         base64Content.c_str(),
         (DWORD)base64Content.length(),
         CRYPT_STRING_BASE64,
         NULL,
-        &cbBinary,
-        NULL,
-        NULL))
+        &cbDecoded,
+        NULL, NULL))
     {
-        LOG("Failed to get binary size: %d", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
-    
-    der.resize(cbBinary);
-    
+
+    der.resize(cbDecoded);
     if (!CryptStringToBinaryA(
         base64Content.c_str(),
         (DWORD)base64Content.length(),
         CRYPT_STRING_BASE64,
         der.data(),
-        &cbBinary,
-        NULL,
-        NULL))
+        &cbDecoded,
+        NULL, NULL))
     {
-        LOG("Failed to decode base64: %d", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
-    
-    der.resize(cbBinary);
+
     return S_OK;
 }
 
-// Import private key from DER
 HRESULT CertificateHelper::ImportPrivateKey(
     const std::vector<BYTE>& keyDer,
     NCRYPT_KEY_HANDLE* phKey)
 {
-    LOG("ImportPrivateKey: %d bytes", (int)keyDer.size());
-    
-    if (!_hProvider)
+    LOG("ImportPrivateKey: %d bytes", keyDer.size());
+
+    // Open storage provider
+    if (_hProvider == 0)
     {
-        LOG("No key storage provider");
-        return E_FAIL;
+        SECURITY_STATUS status = NCryptOpenStorageProvider(
+            &_hProvider,
+            MS_KEY_STORAGE_PROVIDER,  // Use MS KSP for import
+            0);
+
+        if (status != ERROR_SUCCESS)
+        {
+            LOG("NCryptOpenStorageProvider failed: 0x%08x", status);
+            return HRESULT_FROM_NT(status);
+        }
     }
-    
-    // First, decode the PKCS#8 or RSA key blob
-    DWORD cbKeyBlob = 0;
-    PCRYPT_PRIVATE_KEY_INFO pKeyInfo = NULL;
-    
-    // Try to decode as PKCS#8 private key info
-    if (!CryptDecodeObjectEx(
+
+    // Try to decode as PKCS#8 first
+    CRYPT_PRIVATE_KEY_INFO* pKeyInfo = NULL;
+    DWORD cbKeyInfo = 0;
+
+    if (CryptDecodeObjectEx(
         X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
         PKCS_PRIVATE_KEY_INFO,
         keyDer.data(),
@@ -676,220 +831,218 @@ HRESULT CertificateHelper::ImportPrivateKey(
         CRYPT_DECODE_ALLOC_FLAG,
         NULL,
         &pKeyInfo,
-        &cbKeyBlob))
+        &cbKeyInfo))
     {
-        // Try as RSA private key directly
-        DWORD dwErr = GetLastError();
-        LOG("Not PKCS#8, trying RSA format: %d", dwErr);
-        
-        // For RSA format, we need to import differently
-        NCRYPT_KEY_HANDLE hKey = 0;
-        
-        // Create a new key in the provider
-        SECURITY_STATUS status = NCryptCreatePersistedKey(
+        LOG("Decoded as PKCS#8");
+
+        // Import using NCrypt
+        NCryptBufferDesc bufferDesc = {0};
+        NCryptBuffer buffer = {0};
+
+        buffer.BufferType = NCRYPTBUFFER_PKCS_KEY_NAME;
+        buffer.cbBuffer = (DWORD)((_containerName.length() + 1) * sizeof(WCHAR));
+        buffer.pvBuffer = (PVOID)_containerName.c_str();
+
+        bufferDesc.ulVersion = NCRYPTBUFFER_VERSION;
+        bufferDesc.cBuffers = 1;
+        bufferDesc.pBuffers = &buffer;
+
+        SECURITY_STATUS status = NCryptImportKey(
             _hProvider,
-            &hKey,
-            BCRYPT_RSA_ALGORITHM,
-            _containerName.c_str(),
             0,
+            NCRYPT_PKCS8_PRIVATE_KEY_BLOB,
+            &bufferDesc,
+            phKey,
+            (PBYTE)keyDer.data(),
+            (DWORD)keyDer.size(),
             NCRYPT_OVERWRITE_KEY_FLAG);
-        
-        if (status != ERROR_SUCCESS)
+
+        LocalFree(pKeyInfo);
+
+        if (status == ERROR_SUCCESS)
         {
-            LOG("Failed to create key: 0x%08x", status);
-            return HRESULT_FROM_NT(status);
+            LOG("Key imported successfully");
+            return S_OK;
         }
-        
-        // For now, we'll need to handle this case differently
-        NCryptFreeObject(hKey);
-        return E_NOTIMPL;
+
+        LOG("NCryptImportKey failed: 0x%08x", status);
     }
-    
-    // We have PKCS#8 key info, now import via NCrypt
-    BCRYPT_RSAKEY_BLOB* pRsaBlob = NULL;
-    DWORD cbRsaBlob = 0;
-    
-    // Decode the RSA private key from the PKCS#8 container
-    if (!CryptDecodeObjectEx(
-        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-        CNG_RSA_PRIVATE_KEY_BLOB,
-        pKeyInfo->PrivateKey.pbData,
-        pKeyInfo->PrivateKey.cbData,
-        CRYPT_DECODE_ALLOC_FLAG,
-        NULL,
-        &pRsaBlob,
-        &cbRsaBlob))
+
+    // Try as raw RSA key
+    LOG("Trying to decode as RSA private key");
+
+    BCRYPT_ALG_HANDLE hAlg = NULL;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_RSA_ALGORITHM, NULL, 0);
+    if (!BCRYPT_SUCCESS(status))
     {
-        DWORD dwErr = GetLastError();
-        LocalFree(pKeyInfo);
-        LOG("Failed to decode RSA key: %d", dwErr);
-        return HRESULT_FROM_WIN32(dwErr);
-    }
-    
-    // Import the key into NCrypt
-    SECURITY_STATUS status = NCryptImportKey(
-        _hProvider,
-        0,
-        BCRYPT_RSAPRIVATE_BLOB,
-        NULL,
-        phKey,
-        (PBYTE)pRsaBlob,
-        cbRsaBlob,
-        NCRYPT_DO_NOT_FINALIZE_FLAG);
-    
-    if (status != ERROR_SUCCESS)
-    {
-        LocalFree(pRsaBlob);
-        LocalFree(pKeyInfo);
-        LOG("Failed to import key: 0x%08x", status);
+        LOG("BCryptOpenAlgorithmProvider failed: 0x%08x", status);
         return HRESULT_FROM_NT(status);
     }
-    
-    // Set key name for the container
-    status = NCryptSetProperty(
-        *phKey,
-        NCRYPT_NAME_PROPERTY,
-        (PBYTE)_containerName.c_str(),
-        (DWORD)((_containerName.length() + 1) * sizeof(WCHAR)),
+
+    // Try importing as BCRYPT_RSAPRIVATE_BLOB
+    BCRYPT_KEY_HANDLE hBcryptKey = NULL;
+    status = BCryptImportKeyPair(
+        hAlg,
+        NULL,
+        LEGACY_RSAPRIVATE_BLOB,  // Try legacy format
+        &hBcryptKey,
+        (PUCHAR)keyDer.data(),
+        (ULONG)keyDer.size(),
         0);
-    
-    // Finalize the key
-    status = NCryptFinalizeKey(*phKey, 0);
-    
-    LocalFree(pRsaBlob);
-    LocalFree(pKeyInfo);
-    
-    if (status != ERROR_SUCCESS)
+
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+
+    if (BCRYPT_SUCCESS(status))
     {
-        NCryptFreeObject(*phKey);
-        *phKey = 0;
-        LOG("Failed to finalize key: 0x%08x", status);
-        return HRESULT_FROM_NT(status);
+        // Export and import to NCrypt
+        ULONG cbBlob = 0;
+        BCryptExportKey(hBcryptKey, NULL, BCRYPT_RSAPRIVATE_BLOB, NULL, 0, &cbBlob, 0);
+
+        std::vector<BYTE> blob(cbBlob);
+        BCryptExportKey(hBcryptKey, NULL, BCRYPT_RSAPRIVATE_BLOB, blob.data(), cbBlob, &cbBlob, 0);
+        BCryptDestroyKey(hBcryptKey);
+
+        SECURITY_STATUS ncStatus = NCryptImportKey(
+            _hProvider,
+            0,
+            BCRYPT_RSAPRIVATE_BLOB,
+            NULL,
+            phKey,
+            blob.data(),
+            cbBlob,
+            NCRYPT_OVERWRITE_KEY_FLAG);
+
+        if (ncStatus == ERROR_SUCCESS)
+        {
+            LOG("Key imported via BCrypt->NCrypt");
+            return S_OK;
+        }
     }
-    
-    LOG("Private key imported successfully");
-    return S_OK;
+
+    LOG("Failed to import private key");
+    return E_FAIL;
 }
 
-// Associate private key with certificate
 HRESULT CertificateHelper::AssociateKeyWithCert(
     PCCERT_CONTEXT pCert,
     NCRYPT_KEY_HANDLE hKey)
 {
     LOG("AssociateKeyWithCert");
-    
-    // Set up the key provider info
-    CRYPT_KEY_PROV_INFO keyProvInfo;
-    ZeroMemory(&keyProvInfo, sizeof(keyProvInfo));
-    keyProvInfo.pwszContainerName = const_cast<LPWSTR>(_containerName.c_str());
-    keyProvInfo.pwszProvName = const_cast<LPWSTR>(MS_KEY_STORAGE_PROVIDER_NAME);
-    keyProvInfo.dwProvType = 0; // CNG provider
-    keyProvInfo.dwFlags = 0;
+
+    CRYPT_KEY_PROV_INFO keyProvInfo = {0};
+    keyProvInfo.pwszContainerName = (LPWSTR)_containerName.c_str();
+    keyProvInfo.pwszProvName = MS_KEY_STORAGE_PROVIDER;
+    keyProvInfo.dwProvType = 0;
+    keyProvInfo.dwFlags = CRYPT_MACHINE_KEYSET;
     keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
-    
-    // Set the property on the certificate
+
     if (!CertSetCertificateContextProperty(
         pCert,
         CERT_KEY_PROV_INFO_PROP_ID,
         0,
         &keyProvInfo))
     {
-        LOG("Failed to set key provider info: %d", GetLastError());
+        LOG("CertSetCertificateContextProperty failed: %d", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
-    
-    // Also set the NCRYPT key handle directly
-    CERT_KEY_CONTEXT keyContext;
-    ZeroMemory(&keyContext, sizeof(keyContext));
-    keyContext.cbSize = sizeof(keyContext);
-    keyContext.hNCryptKey = hKey;
-    keyContext.dwKeySpec = CERT_NCRYPT_KEY_SPEC;
-    
-    if (!CertSetCertificateContextProperty(
-        pCert,
-        CERT_KEY_CONTEXT_PROP_ID,
-        0,
-        &keyContext))
-    {
-        LOG("Failed to set key context: %d", GetLastError());
-        // Non-fatal, continue
-    }
-    
-    LOG("Key associated with certificate");
+
     return S_OK;
 }
 
-// Parse JSON string value (simple implementation)
 std::wstring CertificateHelper::ParseJsonString(
     const std::wstring& json,
     const std::wstring& key)
 {
-    // Look for "key":"value" or "key": "value"
     std::wstring searchKey = L"\"" + key + L"\"";
     size_t keyPos = json.find(searchKey);
-    
     if (keyPos == std::wstring::npos)
         return L"";
-    
-    // Find the colon
-    size_t colonPos = json.find(L':', keyPos + searchKey.length());
+
+    size_t colonPos = json.find(L':', keyPos);
     if (colonPos == std::wstring::npos)
         return L"";
-    
-    // Find the opening quote
-    size_t startQuote = json.find(L'"', colonPos + 1);
-    if (startQuote == std::wstring::npos)
+
+    size_t valueStart = json.find(L'"', colonPos);
+    if (valueStart == std::wstring::npos)
         return L"";
-    
-    // Find the closing quote (handle escaped quotes)
-    size_t endQuote = startQuote + 1;
-    while (endQuote < json.length())
-    {
-        if (json[endQuote] == L'"' && json[endQuote - 1] != L'\\')
-            break;
-        endQuote++;
-    }
-    
-    if (endQuote >= json.length())
+
+    valueStart++;
+    size_t valueEnd = json.find(L'"', valueStart);
+    if (valueEnd == std::wstring::npos)
         return L"";
-    
-    std::wstring value = json.substr(startQuote + 1, endQuote - startQuote - 1);
-    
-    // Handle escape sequences
-    size_t pos = 0;
-    while ((pos = value.find(L"\\n", pos)) != std::wstring::npos)
-    {
-        value.replace(pos, 2, L"\n");
-        pos++;
-    }
-    pos = 0;
-    while ((pos = value.find(L"\\\"", pos)) != std::wstring::npos)
-    {
-        value.replace(pos, 2, L"\"");
-        pos++;
-    }
-    
-    return value;
+
+    return json.substr(valueStart, valueEnd - valueStart);
 }
 
-// Parse JSON string to narrow string
 std::string CertificateHelper::ParseJsonStringNarrow(
     const std::wstring& json,
     const std::wstring& key)
 {
     std::wstring wideValue = ParseJsonString(json, key);
-    
     if (wideValue.empty())
         return "";
-    
-    // Convert to narrow string
+
     int size = WideCharToMultiByte(CP_UTF8, 0, wideValue.c_str(), -1, NULL, 0, NULL, NULL);
     if (size <= 0)
         return "";
-    
+
     std::string result(size - 1, '\0');
     WideCharToMultiByte(CP_UTF8, 0, wideValue.c_str(), -1, &result[0], size, NULL, NULL);
-    
     return result;
 }
 
+HRESULT CertificateHelper::Base64Decode(
+    const std::wstring& base64,
+    std::vector<BYTE>& decoded)
+{
+    // Convert wide to narrow
+    int size = WideCharToMultiByte(CP_UTF8, 0, base64.c_str(), -1, NULL, 0, NULL, NULL);
+    if (size <= 0)
+        return E_INVALIDARG;
+
+    std::string base64Narrow(size - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, base64.c_str(), -1, &base64Narrow[0], size, NULL, NULL);
+
+    // Decode
+    DWORD cbDecoded = 0;
+    if (!CryptStringToBinaryA(
+        base64Narrow.c_str(),
+        (DWORD)base64Narrow.length(),
+        CRYPT_STRING_BASE64,
+        NULL,
+        &cbDecoded,
+        NULL, NULL))
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    decoded.resize(cbDecoded);
+    if (!CryptStringToBinaryA(
+        base64Narrow.c_str(),
+        (DWORD)base64Narrow.length(),
+        CRYPT_STRING_BASE64,
+        decoded.data(),
+        &cbDecoded,
+        NULL, NULL))
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    return S_OK;
+}
+
+// ============================================================================
+// Factory Function
+// ============================================================================
+
+HRESULT CertificateHelper_CreateInstance(CertificateHelper** ppHelper)
+{
+    if (ppHelper == NULL)
+        return E_INVALIDARG;
+
+    *ppHelper = new(std::nothrow) CertificateHelper();
+    if (*ppHelper == NULL)
+        return E_OUTOFMEMORY;
+
+    return S_OK;
+}
