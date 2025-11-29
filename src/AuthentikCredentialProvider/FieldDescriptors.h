@@ -1,21 +1,23 @@
 // FieldDescriptors.h
-// UI field definitions for passwordless credential provider
-// Note: No password field - this is intentionally passwordless!
+// Definitions for credential provider fields
 
 #pragma once
 
-#include <credentialprovider.h>
 #include <windows.h>
+#include <credentialprovider.h>
+#include <shlwapi.h>
 
-// Field IDs - Passwordless flow
+#pragma comment(lib, "Shlwapi.lib")
+
+// Field IDs
 enum FIELD_ID
 {
-    FID_LOGO = 0,           // Tile image
-    FID_LARGE_TEXT,         // Title text
-    FID_SMALL_TEXT,         // Status/instruction text  
-    FID_USERNAME,           // Username input
-    FID_OTP,                // OTP code input (shown after username validation)
-    FID_SUBMIT,             // Submit button
+    FID_LOGO = 0,
+    FID_LARGE_TEXT,
+    FID_SMALL_TEXT,
+    FID_USERNAME,
+    FID_OTP,
+    FID_SUBMIT,
     FID_NUM_FIELDS
 };
 
@@ -26,36 +28,26 @@ struct FIELD_STATE_PAIR
     CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE cpfis;
 };
 
-// Field descriptors - Define the UI elements
+// Field descriptors - Note: CPFG_CREDENTIAL_PROVIDER_LOGO and CPFG_CREDENTIAL_PROVIDER_LABEL
+// are GUIDs defined in credentialprovider.h
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
-    { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                      CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless",    CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Sign in with your identity", CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",                  CPFG_NONE },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, L"Verification Code",         CPFG_NONE },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",                   CPFG_NONE },
+    { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                           CPFG_CREDENTIAL_PROVIDER_LOGO },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless Login",   CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Sign in with OTP",               GUID_NULL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",                       GUID_NULL },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, L"OTP Code",                       GUID_NULL },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",                        GUID_NULL },
 };
 
-// Initial field states - Username step
-static const FIELD_STATE_PAIR s_rgFieldStatePairsUnlock[] =
+// Initial field state pairs
+static const FIELD_STATE_PAIR s_rgFieldStatePairs[] =
 {
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_LOGO
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_LARGE_TEXT
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SMALL_TEXT
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_FOCUSED },  // FID_USERNAME - focused initially
-    { CPFS_HIDDEN, CPFIS_NONE },                       // FID_OTP - hidden until needed
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SUBMIT
-};
-
-// Field states for logon scenario
-static const FIELD_STATE_PAIR s_rgFieldStatePairsLogon[] =
-{
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_LOGO
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_LARGE_TEXT
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SMALL_TEXT
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_FOCUSED },  // FID_USERNAME - focused initially
-    { CPFS_HIDDEN, CPFIS_NONE },                       // FID_OTP - hidden until needed
+    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_FOCUSED },  // FID_USERNAME
+    { CPFS_HIDDEN, CPFIS_NONE },                       // FID_OTP (hidden initially)
     { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SUBMIT
 };
 
@@ -80,7 +72,7 @@ inline HRESULT FieldDescriptorCoAllocCopy(
         }
         else
         {
-            pcpfd->pszLabel = nullptr;
+            pcpfd->pszLabel = NULL;
             hr = S_OK;
         }
 
