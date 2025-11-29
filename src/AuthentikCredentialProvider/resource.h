@@ -3,5 +3,5 @@
 
 #pragma once
 
-// Icon resource ID
+// Icon resource ID - must match resource.rc
 #define IDI_AUTHENTIK_ICON  101
