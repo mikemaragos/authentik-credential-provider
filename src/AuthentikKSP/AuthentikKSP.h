@@ -1,6 +1,8 @@
 // AuthentikKSP.h
 // Authentik Key Storage Provider for PKINIT authentication
+//
 // This KSP allows Windows to use certificates issued by Authentik for domain logon
+// without requiring a physical smart card or TPM.
 
 #pragma once
 
@@ -10,84 +12,44 @@
 #include <wincrypt.h>
 #include <string>
 #include <map>
-#include <mutex>
 #include <vector>
 
-// KSP Provider Name - must match registry registration
-#define AUTHENTIK_KSP_NAME L"Authentik Key Storage Provider"
+// Include shared memory structures
+#include "../Shared/SharedMemory.h"
 
-// KSP Interface version
-#define AUTHENTIK_KSP_INTERFACE_VERSION NCRYPT_KEY_STORAGE_INTERFACE_VERSION
+// ============================================================================
+// Internal Handle Structures
+// ============================================================================
 
-// Key container prefix
-#define AUTHENTIK_KEY_PREFIX L"AuthentikPKINIT_"
-
-// Shared memory name for key exchange between credential provider and KSP
-#define AUTHENTIK_SHARED_MEM_NAME L"Global\\AuthentikKSPKeyStore"
-#define AUTHENTIK_SHARED_MEM_SIZE (1024 * 1024)  // 1MB for keys
-
-// Mutex name for synchronization
-#define AUTHENTIK_MUTEX_NAME L"Global\\AuthentikKSPMutex"
-
-// Magic number for validation
-#define AUTHENTIK_KEY_MAGIC 0x4B535041  // "AKSP"
-
-// Maximum number of cached keys
-#define AUTHENTIK_MAX_CACHED_KEYS 16
-
-// Key entry in shared memory
-#pragma pack(push, 1)
-typedef struct _AUTHENTIK_KEY_ENTRY {
-    DWORD dwMagic;                      // Must be AUTHENTIK_KEY_MAGIC
-    DWORD dwFlags;                      // Key flags
-    DWORD dwKeySpec;                    // AT_KEYEXCHANGE or AT_SIGNATURE
-    FILETIME ftCreated;                 // When the key was stored
-    FILETIME ftExpires;                 // When the key expires
-    WCHAR wszContainerName[256];        // Container name
-    WCHAR wszUserName[256];             // Associated username
-    DWORD cbPrivateKey;                 // Size of private key blob
-    DWORD cbCertificate;                // Size of certificate blob
-    BYTE rgbData[1];                    // Variable: PrivateKey followed by Certificate
-} AUTHENTIK_KEY_ENTRY, *PAUTHENTIK_KEY_ENTRY;
-
-typedef struct _AUTHENTIK_KEY_STORE_HEADER {
-    DWORD dwMagic;                      // Must be AUTHENTIK_KEY_MAGIC
-    DWORD dwVersion;                    // Version number
-    DWORD cKeys;                        // Number of keys in store
-    DWORD cbTotalSize;                  // Total size used
-    AUTHENTIK_KEY_ENTRY entries[1];     // Variable array of entries
-} AUTHENTIK_KEY_STORE_HEADER, *PAUTHENTIK_KEY_STORE_HEADER;
-#pragma pack(pop)
+// Magic values for handle validation
+#define AUTHENTIK_PROVIDER_MAGIC    0x50565250  // "PRVP"
+#define AUTHENTIK_KEY_HANDLE_MAGIC  0x4B455948  // "KEYH"
 
 // Internal key handle structure
 typedef struct _AUTHENTIK_KEY {
-    DWORD dwMagic;                      // Validation magic
+    DWORD dwMagic;                      // Must be AUTHENTIK_KEY_HANDLE_MAGIC
     NCRYPT_PROV_HANDLE hProvider;       // Parent provider
     std::wstring containerName;         // Key container name
     std::wstring userName;              // Associated user
     DWORD dwKeySpec;                    // Key specification
     DWORD dwFlags;                      // Key flags
-    std::vector<BYTE> privateKeyBlob;   // BCRYPT_RSAKEY_BLOB
+    std::vector<BYTE> privateKeyBlob;   // BCRYPT_RSAPRIVATE_BLOB
     std::vector<BYTE> certificateBlob;  // DER-encoded certificate
     BCRYPT_KEY_HANDLE hBCryptKey;       // BCrypt key handle for operations
 } AUTHENTIK_KEY, *PAUTHENTIK_KEY;
 
 // Internal provider handle structure
 typedef struct _AUTHENTIK_PROVIDER {
-    DWORD dwMagic;                      // Validation magic
+    DWORD dwMagic;                      // Must be AUTHENTIK_PROVIDER_MAGIC
     DWORD dwFlags;                      // Provider flags
     std::map<std::wstring, PAUTHENTIK_KEY> keys;  // Opened keys
 } AUTHENTIK_PROVIDER, *PAUTHENTIK_PROVIDER;
-
-// Magic values for handle validation
-#define AUTHENTIK_PROVIDER_MAGIC 0x50565250  // "PRVP"
-#define AUTHENTIK_KEY_HANDLE_MAGIC 0x4B455948  // "KEYH"
 
 // ============================================================================
 // KSP Function Table
 // ============================================================================
 
-// Required KSP functions
+// Required KSP functions (NCrypt interface)
 SECURITY_STATUS WINAPI AuthentikKSPOpenProvider(
     _Out_ NCRYPT_PROV_HANDLE* phProvider,
     _In_opt_ LPCWSTR pszProviderName,
@@ -235,7 +197,6 @@ SECURITY_STATUS WINAPI AuthentikKSPFreeSecret(
     _In_ NCRYPT_PROV_HANDLE hProvider,
     _In_ NCRYPT_SECRET_HANDLE hSharedSecret);
 
-// Additional functions for V2 interface
 SECURITY_STATUS WINAPI AuthentikKSPImportKey(
     _In_ NCRYPT_PROV_HANDLE hProvider,
     _In_opt_ NCRYPT_KEY_HANDLE hImportKey,
@@ -275,31 +236,5 @@ SECURITY_STATUS WINAPI AuthentikKSPIsAlgSupported(
     _In_ NCRYPT_PROV_HANDLE hProvider,
     _In_ LPCWSTR pszAlgId,
     _In_ DWORD dwFlags);
-
-// ============================================================================
-// Helper functions for credential provider integration
-// ============================================================================
-
-// Store a key in the shared memory for KSP to use
-HRESULT AuthentikKSP_StoreKey(
-    _In_ LPCWSTR wszContainerName,
-    _In_ LPCWSTR wszUserName,
-    _In_reads_bytes_(cbPrivateKey) const BYTE* pbPrivateKey,
-    _In_ DWORD cbPrivateKey,
-    _In_reads_bytes_(cbCertificate) const BYTE* pbCertificate,
-    _In_ DWORD cbCertificate,
-    _In_ DWORD dwKeySpec,
-    _In_ DWORD dwValidityMinutes);
-
-// Remove a key from shared memory
-HRESULT AuthentikKSP_RemoveKey(
-    _In_ LPCWSTR wszContainerName);
-
-// Check if a key exists
-BOOL AuthentikKSP_KeyExists(
-    _In_ LPCWSTR wszContainerName);
-
-// Get the KSP name for use in KERB_SMARTCARD_CSP_INFO
-LPCWSTR AuthentikKSP_GetProviderName();
 
 #endif // AUTHENTIK_KSP_H
