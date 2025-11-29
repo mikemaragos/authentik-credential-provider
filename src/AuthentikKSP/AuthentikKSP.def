@@ -1,0 +1,14 @@
+; AuthentikKSP.def
+; Module definition file for Authentik Key Storage Provider
+
+LIBRARY "AuthentikKSP"
+
+EXPORTS
+    GetKeyStorageInterface          @1
+    GetKeyStorageInterfaceEx        @2
+    
+    ; Helper functions for credential provider
+    AuthentikKSP_StoreKey           @10
+    AuthentikKSP_RemoveKey          @11
+    AuthentikKSP_KeyExists          @12
+    AuthentikKSP_GetProviderName    @13
