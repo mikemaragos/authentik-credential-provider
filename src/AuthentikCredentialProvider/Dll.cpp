@@ -247,6 +247,71 @@ static HRESULT SetRegistryKeyValueDWORD(
     return hr;
 }
 
+// Helper function to set registry value ONLY if it doesn't exist
+static HRESULT SetRegistryKeyValueIfNotExists(
+    HKEY hKeyRoot,
+    PCWSTR pszKeyPath,
+    PCWSTR pszValueName,
+    PCWSTR pszData)
+{
+    HKEY hKey = NULL;
+    LONG lResult;
+    
+    // Try to open the key first
+    lResult = RegOpenKeyExW(hKeyRoot, pszKeyPath, 0, KEY_READ, &hKey);
+    
+    if (lResult == ERROR_SUCCESS)
+    {
+        // Key exists, check if value exists
+        DWORD dwType;
+        DWORD dwSize = 0;
+        lResult = RegQueryValueExW(hKey, pszValueName, NULL, &dwType, NULL, &dwSize);
+        RegCloseKey(hKey);
+        
+        if (lResult == ERROR_SUCCESS)
+        {
+            // Value already exists - don't overwrite
+            LOG("Registry value %S already exists, keeping existing value", pszValueName);
+            return S_OK;
+        }
+    }
+    
+    // Value doesn't exist, create it
+    return SetRegistryKeyValue(hKeyRoot, pszKeyPath, pszValueName, pszData);
+}
+
+static HRESULT SetRegistryKeyValueDWORDIfNotExists(
+    HKEY hKeyRoot,
+    PCWSTR pszKeyPath,
+    PCWSTR pszValueName,
+    DWORD dwData)
+{
+    HKEY hKey = NULL;
+    LONG lResult;
+    
+    // Try to open the key first
+    lResult = RegOpenKeyExW(hKeyRoot, pszKeyPath, 0, KEY_READ, &hKey);
+    
+    if (lResult == ERROR_SUCCESS)
+    {
+        // Key exists, check if value exists
+        DWORD dwType;
+        DWORD dwSize = 0;
+        lResult = RegQueryValueExW(hKey, pszValueName, NULL, &dwType, NULL, &dwSize);
+        RegCloseKey(hKey);
+        
+        if (lResult == ERROR_SUCCESS)
+        {
+            // Value already exists - don't overwrite
+            LOG("Registry value %S already exists, keeping existing value", pszValueName);
+            return S_OK;
+        }
+    }
+    
+    // Value doesn't exist, create it
+    return SetRegistryKeyValueDWORD(hKeyRoot, pszKeyPath, pszValueName, dwData);
+}
+
 // DllRegisterServer - Register the COM server and credential provider
 STDAPI DllRegisterServer()
 {
@@ -291,16 +356,26 @@ STDAPI DllRegisterServer()
         hr = SetRegistryKeyValue(HKEY_LOCAL_MACHINE, szSubkey, NULL, L"AuthentikPasswordlessCredentialProvider");
     }
 
-    // Create default configuration
+    // Create default configuration ONLY if values don't exist
+    // This prevents overwriting user's configuration on re-registration
     if (SUCCEEDED(hr))
     {
-        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerUrl", L"authentik.example.com");
-        SetRegistryKeyValueDWORD(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerPort", 443);
-        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"FlowSlug", L"windows-passwordless");
-        SetRegistryKeyValueDWORD(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"UseHttps", 1);
-        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"Domain", L"YOURDOMAIN");
-        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"DomainFQDN", L"yourdomain.local");
-        SetRegistryKeyValueDWORD(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"IgnoreCertErrors", 1);
+        LOG("Creating default configuration (only for missing values)");
+        
+        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
+            L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerUrl", L"authentik.yourdomain.com");
+        SetRegistryKeyValueDWORDIfNotExists(HKEY_LOCAL_MACHINE, 
+            L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerPort", 443);
+        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
+            L"SOFTWARE\\AuthentikPasswordlessCP", L"FlowSlug", L"windows-passwordless");
+        SetRegistryKeyValueDWORDIfNotExists(HKEY_LOCAL_MACHINE, 
+            L"SOFTWARE\\AuthentikPasswordlessCP", L"UseHttps", 1);
+        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
+            L"SOFTWARE\\AuthentikPasswordlessCP", L"Domain", L"YOURDOMAIN");
+        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
+            L"SOFTWARE\\AuthentikPasswordlessCP", L"DomainFQDN", L"yourdomain.com");
+        SetRegistryKeyValueDWORDIfNotExists(HKEY_LOCAL_MACHINE, 
+            L"SOFTWARE\\AuthentikPasswordlessCP", L"IgnoreCertErrors", 1);
     }
 
     LOG("DllRegisterServer returning 0x%08x", hr);
@@ -336,6 +411,9 @@ STDAPI DllUnregisterServer()
     {
         hr = HRESULT_FROM_WIN32(lResult);
     }
+
+    // Note: We intentionally do NOT delete the configuration registry key
+    // so that user settings are preserved across reinstalls
 
     LOG("DllUnregisterServer returning 0x%08x", hr);
     return hr;
