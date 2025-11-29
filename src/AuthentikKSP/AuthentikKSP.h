@@ -41,8 +41,8 @@
 // Maximum sizes for fixed buffers
 #define MAX_CONTAINER_NAME  256
 #define MAX_USER_NAME       256
-#define MAX_KEY_BLOB_SIZE   4096
-#define MAX_CERT_BLOB_SIZE  8192
+#define MAX_KEY_BLOB_SIZE   8192   // Enough for 4096-bit RSA keys
+#define MAX_CERT_BLOB_SIZE  16384  // Enough for large certificate chains
 
 // Internal key handle structure - FIXED SIZE, NO STL
 typedef struct _AUTHENTIK_KEY {
