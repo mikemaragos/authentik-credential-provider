@@ -51,9 +51,11 @@ typedef struct _AUTHENTIK_PROVIDER {
 // ============================================================================
 
 // Get the KSP function table
+// Note: The actual function is defined in AuthentikKSPDll.cpp with PVOID*
+// to avoid dependency on the SDK's NCRYPT_KEY_STORAGE_FUNCTION_TABLE definition
 extern "C" __declspec(dllexport) NTSTATUS WINAPI GetKeyStorageInterface(
     _In_ LPCWSTR pszProviderName,
-    _Out_ NCRYPT_KEY_STORAGE_FUNCTION_TABLE** ppFunctionTable,
+    _Out_ PVOID* ppFunctionTable,
     _In_ DWORD dwFlags);
 
 // ============================================================================
