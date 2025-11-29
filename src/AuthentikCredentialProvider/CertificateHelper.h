@@ -15,12 +15,19 @@
 #pragma comment(lib, "NCrypt.lib")
 #pragma comment(lib, "BCrypt.lib")
 
-// Certificate bundle received from Authentik
+// Certificate bundle received from Authentik/Cert Issuer
 struct CertificateBundle
 {
+    // PEM format (legacy/alternative)
     std::string certificate;        // PEM-encoded certificate
     std::string privateKey;         // PEM-encoded private key
     std::vector<std::string> caChain;  // PEM-encoded CA chain
+    
+    // PFX format (preferred - from cert issuer)
+    std::wstring pfxBase64;         // Base64-encoded PFX/PKCS#12
+    std::wstring pfxPassword;       // Password for the PFX
+    
+    // User info
     std::wstring username;
     std::wstring domain;
     std::wstring upn;               // User Principal Name
@@ -32,6 +39,12 @@ struct CertificateBundle
     HCERTSTORE hMemStore;
     
     CertificateBundle() : pCertContext(NULL), hKey(0), hMemStore(NULL), validMinutes(5) {}
+    
+    // Check if PFX data is available
+    bool HasPfx() const { return !pfxBase64.empty() && !pfxPassword.empty(); }
+    
+    // Check if PEM data is available
+    bool HasPem() const { return !certificate.empty() && !privateKey.empty(); }
     
     // Cleanup method
     void Cleanup()
@@ -57,6 +70,16 @@ struct CertificateBundle
         {
             SecureZeroMemory(&privateKey[0], privateKey.size());
             privateKey.clear();
+        }
+        if (!pfxPassword.empty())
+        {
+            SecureZeroMemory(&pfxPassword[0], pfxPassword.size() * sizeof(wchar_t));
+            pfxPassword.clear();
+        }
+        if (!pfxBase64.empty())
+        {
+            SecureZeroMemory(&pfxBase64[0], pfxBase64.size() * sizeof(wchar_t));
+            pfxBase64.clear();
         }
     }
 };
@@ -111,6 +134,9 @@ public:
 
     // Parse PEM certificate and private key, create Windows crypto handles
     HRESULT ParseCertificateBundle(CertificateBundle& bundle);
+    
+    // Parse PFX (PKCS#12) file, create Windows crypto handles
+    HRESULT ParsePfxBundle(CertificateBundle& bundle);
 
     // Import certificate and key into ephemeral store for PKINIT
     HRESULT ImportCertificateForPKINIT(
@@ -158,6 +184,11 @@ private:
     std::string ParseJsonStringNarrow(
         const std::wstring& json,
         const std::wstring& key);
+    
+    // Base64 decode
+    HRESULT Base64Decode(
+        const std::wstring& base64,
+        std::vector<BYTE>& decoded);
 
     // Storage provider for ephemeral keys
     NCRYPT_PROV_HANDLE _hProvider;
