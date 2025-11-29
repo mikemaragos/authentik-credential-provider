@@ -1,5 +1,6 @@
 // AuthentikAPI.cpp
 // HTTP client for Authentik API communication with session management
+// Includes certificate issuer integration for passwordless authentication
 
 #include "AuthentikAPI.h"
 #include "Logger.h"
@@ -13,7 +14,8 @@ AuthentikAPI::AuthentikAPI() :
     _serverPort(443),
     _useHttps(true),
     _ignoreCertErrors(false),
-    _configurationValid(false)
+    _configurationValid(false),
+    _certIssuerPort(8443)
 {
     LOG("AuthentikAPI::Constructor");
     _LoadConfiguration();
@@ -171,15 +173,313 @@ AuthentikResponse AuthentikAPI::SubmitOTP(const std::wstring& otp)
     response = _ParseAuthentikResponse(responseBody);
     response.rawResponse = responseBody;
     
-    // If successful, populate user info
+    // If Authentik authentication successful, request certificate
     if (response.status == AuthStatus::SUCCESS)
     {
+        LOG("Authentik auth successful, requesting certificate...");
+        
         response.username = _currentUsername;
         response.domain = _domain;
         response.upn = _currentUsername + L"@" + _domainFQDN;
+        
+        // Request certificate from certificate issuer
+        if (!_certIssuerUrl.empty())
+        {
+            AuthentikResponse certResponse = _RequestCertificate(_currentUsername, response.upn, _domain);
+            
+            if (!certResponse.pfxBase64.empty())
+            {
+                // Copy certificate data to response
+                response.certificatePem = certResponse.certificatePem;
+                response.privateKeyPem = certResponse.privateKeyPem;
+                response.pfxBase64 = certResponse.pfxBase64;
+                response.pfxPassword = certResponse.pfxPassword;
+                response.certValidMinutes = certResponse.certValidMinutes;
+                LOG("Certificate obtained successfully");
+            }
+            else
+            {
+                LOG("WARNING: Failed to obtain certificate: %S", certResponse.message.c_str());
+                // Don't fail the auth - user can still log in with password if needed
+            }
+        }
+        else
+        {
+            LOG("Certificate issuer not configured, skipping certificate request");
+        }
     }
     
     return response;
+}
+
+// Request certificate from certificate issuer service
+AuthentikResponse AuthentikAPI::_RequestCertificate(
+    const std::wstring& username,
+    const std::wstring& upn,
+    const std::wstring& domain)
+{
+    LOG("RequestCertificate: user=%S, upn=%S", username.c_str(), upn.c_str());
+    
+    AuthentikResponse response;
+    response.status = AuthStatus::FAILED;
+    
+    if (_certIssuerUrl.empty())
+    {
+        response.message = L"Certificate issuer not configured";
+        return response;
+    }
+    
+    // Build JSON payload
+    std::wstring payload = L"{\"username\":\"" + _EscapeJson(username) + 
+                          L"\",\"upn\":\"" + _EscapeJson(upn) + 
+                          L"\",\"domain\":\"" + _EscapeJson(domain) + L"\"}";
+    
+    // Make HTTP request to certificate issuer
+    std::wstring responseBody;
+    DWORD statusCode = 0;
+    HRESULT hr = _MakeCertIssuerRequest(L"POST", L"/api/v1/issue-certificate", payload, responseBody, statusCode);
+    
+    if (FAILED(hr))
+    {
+        LOG("Certificate issuer request failed: 0x%08x", hr);
+        response.message = L"Failed to connect to certificate issuer";
+        return response;
+    }
+    
+    LOG("Certificate issuer response: status=%d, length=%d", statusCode, (int)responseBody.length());
+    
+    if (statusCode != 200)
+    {
+        LOG("Certificate issuer error: %d", statusCode);
+        response.message = L"Certificate issuer returned error: " + std::to_wstring(statusCode);
+        return response;
+    }
+    
+    // Parse certificate response
+    // Expected fields: success, certificate_pem, pfx_base64, pfx_password, thumbprint
+    
+    std::wstring successStr = _ParseJsonString(responseBody, L"success");
+    if (successStr != L"true" && responseBody.find(L"\"success\":true") == std::wstring::npos &&
+        responseBody.find(L"\"success\": true") == std::wstring::npos)
+    {
+        std::wstring error = _ParseJsonString(responseBody, L"error");
+        LOG("Certificate issuer returned success=false: %S", error.c_str());
+        response.message = error.empty() ? L"Certificate issuance failed" : error;
+        return response;
+    }
+    
+    // Extract certificate data
+    response.certificatePem = _ParseJsonString(responseBody, L"certificate_pem");
+    response.pfxBase64 = _ParseJsonString(responseBody, L"pfx_base64");
+    response.pfxPassword = _ParseJsonString(responseBody, L"pfx_password");
+    
+    if (response.pfxBase64.empty())
+    {
+        LOG("Certificate issuer returned empty PFX");
+        response.message = L"Certificate issuer returned empty certificate";
+        return response;
+    }
+    
+    response.status = AuthStatus::SUCCESS;
+    response.message = L"Certificate obtained";
+    
+    LOG("Certificate obtained: PFX size=%d, password length=%d", 
+        (int)response.pfxBase64.length(), (int)response.pfxPassword.length());
+    
+    return response;
+}
+
+// Make HTTP request to certificate issuer
+HRESULT AuthentikAPI::_MakeCertIssuerRequest(
+    const std::wstring& method,
+    const std::wstring& url,
+    const std::wstring& payload,
+    std::wstring& responseBody,
+    DWORD& statusCode)
+{
+    LOG("CertIssuer HTTP %S %S", method.c_str(), url.c_str());
+
+    HRESULT hr = E_FAIL;
+    HINTERNET hSession = NULL;
+    HINTERNET hConnect = NULL;
+    HINTERNET hRequest = NULL;
+    BOOL bResult = FALSE;
+
+    // Initialize WinHTTP
+    hSession = WinHttpOpen(
+        L"AuthentikCredentialProvider/2.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS,
+        0);
+
+    if (!hSession)
+    {
+        LOG("WinHttpOpen failed: %d", GetLastError());
+        return E_FAIL;
+    }
+
+    // Connect to certificate issuer server
+    hConnect = WinHttpConnect(
+        hSession,
+        _certIssuerUrl.c_str(),
+        _certIssuerPort,
+        0);
+
+    if (!hConnect)
+    {
+        LOG("WinHttpConnect to cert issuer failed: %d", GetLastError());
+        WinHttpCloseHandle(hSession);
+        return E_FAIL;
+    }
+
+    // Create request (certificate issuer uses HTTP, not HTTPS by default)
+    DWORD dwFlags = 0;  // No HTTPS for local cert issuer
+    
+    hRequest = WinHttpOpenRequest(
+        hConnect,
+        method.c_str(),
+        url.c_str(),
+        NULL,
+        WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        dwFlags);
+
+    if (!hRequest)
+    {
+        LOG("WinHttpOpenRequest failed: %d", GetLastError());
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return E_FAIL;
+    }
+
+    // Set headers
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    headers += L"Accept: application/json\r\n";
+    
+    // Add API token authorization
+    if (!_certIssuerToken.empty())
+    {
+        headers += L"Authorization: Bearer " + _certIssuerToken + L"\r\n";
+    }
+    
+    WinHttpAddRequestHeaders(
+        hRequest,
+        headers.c_str(),
+        (DWORD)-1,
+        WINHTTP_ADDREQ_FLAG_ADD);
+
+    // Convert payload to UTF-8
+    std::string payloadUtf8;
+    if (!payload.empty())
+    {
+        int size = WideCharToMultiByte(CP_UTF8, 0, payload.c_str(), -1, NULL, 0, NULL, NULL);
+        if (size > 0)
+        {
+            std::vector<char> buffer(size);
+            WideCharToMultiByte(CP_UTF8, 0, payload.c_str(), -1, &buffer[0], size, NULL, NULL);
+            payloadUtf8 = &buffer[0];
+        }
+    }
+
+    // Send request
+    LPVOID pData = payloadUtf8.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)payloadUtf8.c_str();
+    DWORD dataLen = payloadUtf8.empty() ? 0 : (DWORD)payloadUtf8.length();
+    
+    bResult = WinHttpSendRequest(
+        hRequest,
+        WINHTTP_NO_ADDITIONAL_HEADERS,
+        0,
+        pData,
+        dataLen,
+        dataLen,
+        0);
+
+    if (!bResult)
+    {
+        LOG("WinHttpSendRequest to cert issuer failed: %d", GetLastError());
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return E_FAIL;
+    }
+
+    // Receive response
+    bResult = WinHttpReceiveResponse(hRequest, NULL);
+    if (!bResult)
+    {
+        LOG("WinHttpReceiveResponse from cert issuer failed: %d", GetLastError());
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return E_FAIL;
+    }
+
+    // Get status code
+    DWORD dwSize = sizeof(statusCode);
+    WinHttpQueryHeaders(
+        hRequest,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX,
+        &statusCode,
+        &dwSize,
+        WINHTTP_NO_HEADER_INDEX);
+
+    LOG("CertIssuer HTTP Status: %d", statusCode);
+
+    // Read response body
+    {
+        DWORD dwDownloaded = 0;
+        std::vector<char> responseBuffer;
+
+        for (;;)
+        {
+            dwSize = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &dwSize))
+            {
+                LOG("WinHttpQueryDataAvailable failed: %d", GetLastError());
+                break;
+            }
+
+            if (dwSize == 0)
+                break;
+
+            std::vector<char> tempBuffer(dwSize + 1);
+            ZeroMemory(&tempBuffer[0], dwSize + 1);
+
+            if (!WinHttpReadData(hRequest, &tempBuffer[0], dwSize, &dwDownloaded))
+            {
+                LOG("WinHttpReadData failed: %d", GetLastError());
+                break;
+            }
+
+            responseBuffer.insert(responseBuffer.end(), tempBuffer.begin(), tempBuffer.begin() + dwDownloaded);
+        }
+
+        // Convert response to wide string
+        if (!responseBuffer.empty())
+        {
+            responseBuffer.push_back('\0');
+            int wideSize = MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, NULL, 0);
+            if (wideSize > 0)
+            {
+                std::vector<wchar_t> wideBuffer(wideSize);
+                MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, &wideBuffer[0], wideSize);
+                responseBody = &wideBuffer[0];
+                hr = S_OK;
+            }
+        }
+        else
+        {
+            hr = S_OK; // Empty response is OK
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    return hr;
 }
 
 // Escape JSON string
@@ -227,7 +527,7 @@ void AuthentikAPI::_LoadConfiguration()
         return;
     }
 
-    WCHAR buffer[256];
+    WCHAR buffer[1024];
     DWORD bufferSize;
     DWORD dwValue;
     bool hasError = false;
@@ -343,6 +643,49 @@ void AuthentikAPI::_LoadConfiguration()
         }
     }
 
+    // Read certificate issuer URL (OPTIONAL - for passwordless)
+    bufferSize = sizeof(buffer);
+    result = RegQueryValueExW(hKey, L"CertIssuerUrl", NULL, NULL, (LPBYTE)buffer, &bufferSize);
+    if (result == ERROR_SUCCESS && buffer[0] != L'\0')
+    {
+        _certIssuerUrl = buffer;
+        LOG("CertIssuerUrl: %S", _certIssuerUrl.c_str());
+    }
+    else
+    {
+        LOG("CertIssuerUrl: (not configured - passwordless disabled)");
+    }
+
+    // Read certificate issuer port (optional, default 8443)
+    bufferSize = sizeof(DWORD);
+    result = RegQueryValueExW(hKey, L"CertIssuerPort", NULL, NULL, (LPBYTE)&dwValue, &bufferSize);
+    if (result == ERROR_SUCCESS)
+    {
+        _certIssuerPort = (INTERNET_PORT)dwValue;
+        LOG("CertIssuerPort: %d", _certIssuerPort);
+    }
+    else
+    {
+        _certIssuerPort = 8443;
+        LOG("CertIssuerPort: %d (default)", _certIssuerPort);
+    }
+
+    // Read certificate issuer API token (REQUIRED if CertIssuerUrl is set)
+    bufferSize = sizeof(buffer);
+    result = RegQueryValueExW(hKey, L"CertIssuerToken", NULL, NULL, (LPBYTE)buffer, &bufferSize);
+    if (result == ERROR_SUCCESS && buffer[0] != L'\0')
+    {
+        _certIssuerToken = buffer;
+        LOG("CertIssuerToken: (configured, %d chars)", (int)_certIssuerToken.length());
+    }
+    else
+    {
+        if (!_certIssuerUrl.empty())
+        {
+            LOG("WARNING: CertIssuerToken not configured but CertIssuerUrl is set");
+        }
+    }
+
     RegCloseKey(hKey);
     
     if (!hasError)
@@ -356,7 +699,7 @@ void AuthentikAPI::_LoadConfiguration()
     }
 }
 
-// Make HTTP request
+// Make HTTP request to Authentik
 HRESULT AuthentikAPI::_MakeHttpRequest(
     const std::wstring& method,
     const std::wstring& url,
@@ -683,7 +1026,7 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
         response.status = AuthStatus::SUCCESS;
         response.message = L"Authentication successful";
         
-        // Extract certificate data if present
+        // Extract certificate data if present (legacy support)
         response.certificatePem = _ParseJsonString(json, L"certificate");
         response.privateKeyPem = _ParseJsonString(json, L"private_key");
         
