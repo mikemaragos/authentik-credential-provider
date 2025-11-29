@@ -29,15 +29,16 @@ struct FIELD_STATE_PAIR
 };
 
 // Field descriptors
-// Note: For CPFT_EDIT_TEXT, pszLabel appears as gray placeholder text
+// FID_LARGE_TEXT is the tile name shown in the credential provider list
+// FID_SMALL_TEXT is the subtitle/description
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
-    { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),                         CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik Passwordless"),       CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Sign in with OTP"),             GUID_NULL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),                     GUID_NULL },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"One-time code"),                GUID_NULL },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),                      GUID_NULL },
+    { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),              CPFG_CREDENTIAL_PROVIDER_LOGO },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik Login"),   CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Passwordless sign-in"), GUID_NULL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),          GUID_NULL },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"One-time code"),     GUID_NULL },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),           GUID_NULL },
 };
 
 // Initial field state pairs
