@@ -4,6 +4,7 @@
 #include "AuthentikAPI.h"
 #include "Logger.h"
 #include <sstream>
+#include <new>
 
 #pragma comment(lib, "Winhttp.lib")
 
@@ -64,7 +65,7 @@ AuthentikResponse AuthentikAPI::SubmitUsername(const std::wstring& username)
         return response;
     }
     
-    LOG("SubmitUsername response: status=%d, length=%d", statusCode, responseBody.length());
+    LOG("SubmitUsername response: status=%d, length=%d", statusCode, (int)responseBody.length());
     
     // Parse response
     response = _ParseAuthentikResponse(responseBody);
@@ -99,7 +100,7 @@ AuthentikResponse AuthentikAPI::SubmitOTP(const std::wstring& otp)
         return response;
     }
     
-    LOG("SubmitOTP response: status=%d, length=%d", statusCode, responseBody.length());
+    LOG("SubmitOTP response: status=%d, length=%d", statusCode, (int)responseBody.length());
     
     // Parse response
     response = _ParseAuthentikResponse(responseBody);
@@ -220,6 +221,7 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     HINTERNET hSession = NULL;
     HINTERNET hConnect = NULL;
     HINTERNET hRequest = NULL;
+    BOOL bResult = FALSE;
 
     // Initialize WinHTTP
     hSession = WinHttpOpen(
@@ -312,7 +314,7 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     }
 
     // Send request
-    BOOL bResult = WinHttpSendRequest(
+    bResult = WinHttpSendRequest(
         hRequest,
         WINHTTP_NO_ADDITIONAL_HEADERS,
         0,
@@ -324,7 +326,10 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     if (!bResult)
     {
         LOG("WinHttpSendRequest failed: %d", GetLastError());
-        goto cleanup;
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return E_FAIL;
     }
 
     // Receive response
@@ -332,7 +337,10 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     if (!bResult)
     {
         LOG("WinHttpReceiveResponse failed: %d", GetLastError());
-        goto cleanup;
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return E_FAIL;
     }
 
     // Get status code
@@ -355,7 +363,7 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         DWORD dwDownloaded = 0;
         std::vector<char> responseBuffer;
 
-        do
+        for (;;)
         {
             dwSize = 0;
             if (!WinHttpQueryDataAvailable(hRequest, &dwSize))
@@ -377,8 +385,7 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
             }
 
             responseBuffer.insert(responseBuffer.end(), tempBuffer.begin(), tempBuffer.begin() + dwDownloaded);
-
-        } while (dwSize > 0);
+        }
 
         // Convert response to wide string
         if (!responseBuffer.empty())
@@ -391,16 +398,15 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
                 MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, &wideBuffer[0], wideSize);
                 responseBody = &wideBuffer[0];
                 
-                LOG("Response received: %d bytes", responseBuffer.size());
+                LOG("Response received: %d bytes", (int)responseBuffer.size());
                 hr = S_OK;
             }
         }
     }
 
-cleanup:
-    if (hRequest) WinHttpCloseHandle(hRequest);
-    if (hConnect) WinHttpCloseHandle(hConnect);
-    if (hSession) WinHttpCloseHandle(hSession);
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
 
     return hr;
 }
