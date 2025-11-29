@@ -29,14 +29,15 @@ struct FIELD_STATE_PAIR
 };
 
 // Field descriptors
-// Note: pszLabel requires LPWSTR (non-const), so we cast the literals
+// Note: For CPFT_EDIT_TEXT and CPFT_PASSWORD_TEXT, pszLabel is the placeholder hint
+// We use empty strings so users don't have to clear the field
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
     { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),                         CPFG_CREDENTIAL_PROVIDER_LOGO },
     { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik Passwordless Login"), CPFG_CREDENTIAL_PROVIDER_LABEL },
     { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Sign in with OTP"),             GUID_NULL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),                     GUID_NULL },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"OTP Code"),                     GUID_NULL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L""),                             GUID_NULL },  // Empty - no prefilled text
+    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L""),                             GUID_NULL },  // Empty - no prefilled text
     { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),                      GUID_NULL },
 };
 
@@ -66,7 +67,7 @@ inline HRESULT FieldDescriptorCoAllocCopy(
         pcpfd->cpft = rcpfd.cpft;
         pcpfd->guidFieldType = rcpfd.guidFieldType;
 
-        if (rcpfd.pszLabel)
+        if (rcpfd.pszLabel && rcpfd.pszLabel[0] != L'\0')
         {
             hr = SHStrDupW(rcpfd.pszLabel, &pcpfd->pszLabel);
         }
