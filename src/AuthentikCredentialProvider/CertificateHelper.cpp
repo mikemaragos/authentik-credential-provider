@@ -239,6 +239,7 @@ HRESULT CertificateHelper::ParseAuthResponseForCertificate(
     }
 }
 
+
 HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
 {
     LOG("ParsePfxBundle");
@@ -267,70 +268,182 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
     pfxBlob.cbData = (DWORD)pfxData.size();
     pfxBlob.pbData = pfxData.data();
 
-    // Import PFX to memory store
-    bundle.hMemStore = PFXImportCertStore(
+    // Import PFX - we need CRYPT_EXPORTABLE to get the key out
+    // Use user keyset for temporary storage
+    HCERTSTORE hTempStore = PFXImportCertStore(
         &pfxBlob,
         bundle.pfxPassword.c_str(),
-        CRYPT_EXPORTABLE | PKCS12_NO_PERSIST_KEY | PKCS12_ALLOW_OVERWRITE_KEY);
+        CRYPT_EXPORTABLE | CRYPT_USER_KEYSET);
 
-    if (bundle.hMemStore == NULL)
+    if (hTempStore == NULL)
+    {
+        DWORD err = GetLastError();
+        LOG("PFXImportCertStore (user) failed: %d, trying machine keyset", err);
+        
+        // Try with machine keyset
+        hTempStore = PFXImportCertStore(
+            &pfxBlob,
+            bundle.pfxPassword.c_str(),
+            CRYPT_EXPORTABLE | CRYPT_MACHINE_KEYSET);
+    }
+
+    if (hTempStore == NULL)
     {
         LOG("PFXImportCertStore failed: %d", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    LOG("PFX imported to memory store");
+    LOG("PFX imported to temporary store");
 
-    // Find the certificate with a private key
-    bundle.pCertContext = CertFindCertificateInStore(
-        bundle.hMemStore,
+    // Find the certificate
+    PCCERT_CONTEXT pCert = CertFindCertificateInStore(
+        hTempStore,
         X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
         0,
         CERT_FIND_HAS_PRIVATE_KEY,
         NULL,
         NULL);
 
-    if (bundle.pCertContext == NULL)
+    if (pCert == NULL)
     {
-        // Try finding any certificate
-        bundle.pCertContext = CertEnumCertificatesInStore(bundle.hMemStore, NULL);
+        LOG("No cert with private key, trying any cert");
+        pCert = CertEnumCertificatesInStore(hTempStore, NULL);
     }
 
-    if (bundle.pCertContext == NULL)
+    if (pCert == NULL)
     {
         LOG("No certificate found in PFX");
+        CertCloseStore(hTempStore, 0);
         return E_FAIL;
     }
 
     // Log certificate subject
     WCHAR szSubject[256] = {0};
-    CertGetNameStringW(bundle.pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+    CertGetNameStringW(pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE,
         0, NULL, szSubject, ARRAYSIZE(szSubject));
     LOG("Certificate subject: %S", szSubject);
 
     // Get the private key handle
+    NCRYPT_KEY_HANDLE hKey = 0;
     DWORD dwKeySpec = 0;
     BOOL bCallerFreeKey = FALSE;
 
-    if (!CryptAcquireCertificatePrivateKey(
-        bundle.pCertContext,
+    BOOL bGotKey = CryptAcquireCertificatePrivateKey(
+        pCert,
         CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
         NULL,
-        &bundle.hKey,
+        &hKey,
         &dwKeySpec,
-        &bCallerFreeKey))
+        &bCallerFreeKey);
+
+    if (!bGotKey)
     {
-        LOG("CryptAcquireCertificatePrivateKey failed: %d", GetLastError());
-        // Continue anyway - we might be able to export and reimport
+        LOG("CryptAcquireCertificatePrivateKey (NCrypt) failed: %d", GetLastError());
+        
+        // Try without ONLY_NCRYPT flag
+        bGotKey = CryptAcquireCertificatePrivateKey(
+            pCert,
+            CRYPT_ACQUIRE_SILENT_FLAG,
+            NULL,
+            &hKey,
+            &dwKeySpec,
+            &bCallerFreeKey);
+            
+        if (bGotKey)
+        {
+            LOG("Got key with generic acquire, keySpec=%d", dwKeySpec);
+        }
+    }
+
+    if (bGotKey && hKey)
+    {
+        LOG("Got NCrypt key handle: 0x%p, keySpec=%d", (void*)hKey, dwKeySpec);
+        bundle.hKey = hKey;
+        
+        // Export the private key blob for KSP storage
+        DWORD cbKeyBlob = 0;
+        SECURITY_STATUS status = NCryptExportKey(
+            hKey,
+            0,
+            BCRYPT_RSAPRIVATE_BLOB,
+            NULL,
+            NULL,
+            0,
+            &cbKeyBlob,
+            0);
+
+        if (status == ERROR_SUCCESS && cbKeyBlob > 0)
+        {
+            bundle.privateKeyBlob.resize(cbKeyBlob);
+            status = NCryptExportKey(
+                hKey,
+                0,
+                BCRYPT_RSAPRIVATE_BLOB,
+                NULL,
+                bundle.privateKeyBlob.data(),
+                cbKeyBlob,
+                &cbKeyBlob,
+                0);
+
+            if (status == ERROR_SUCCESS)
+            {
+                LOG("Exported NCrypt private key: %d bytes", cbKeyBlob);
+            }
+            else
+            {
+                LOG("NCryptExportKey (data) failed: 0x%08x", status);
+                bundle.privateKeyBlob.clear();
+            }
+        }
+        else
+        {
+            LOG("NCryptExportKey (size) failed: 0x%08x, cbKeyBlob=%d", status, cbKeyBlob);
+        }
     }
     else
     {
-        LOG("Private key acquired: handle=0x%p, keySpec=%d", (void*)bundle.hKey, dwKeySpec);
+        LOG("Failed to acquire private key");
     }
 
-    return S_OK;
-}
+    // Copy certificate to bundle
+    bundle.pCertContext = CertDuplicateCertificateContext(pCert);
+    
+    // Create our own memory store
+    bundle.hMemStore = CertOpenStore(
+        CERT_STORE_PROV_MEMORY,
+        0,
+        0,
+        CERT_STORE_CREATE_NEW_FLAG,
+        NULL);
 
+    if (bundle.hMemStore)
+    {
+        CertAddCertificateContextToStore(bundle.hMemStore, pCert, CERT_STORE_ADD_ALWAYS, NULL);
+    }
+
+    // Clean up - DON'T close hKey if we need it, but do close the temp store
+    CertFreeCertificateContext(pCert);
+    // Note: We keep hTempStore open if we still need hKey from it
+    // Actually, the key should persist as long as bundle.hKey is valid
+    CertCloseStore(hTempStore, 0);
+
+    // If we got the key blob, we're good
+    if (!bundle.privateKeyBlob.empty())
+    {
+        LOG("ParsePfxBundle succeeded with %d byte key blob", (int)bundle.privateKeyBlob.size());
+        return S_OK;
+    }
+
+    // If we at least have the key handle, that might work
+    if (bundle.hKey)
+    {
+        LOG("ParsePfxBundle: Have key handle but no blob - will try export later");
+        return S_OK;
+    }
+
+    LOG("ParsePfxBundle: No private key obtained");
+    return E_FAIL;
+}
 HRESULT CertificateHelper::ParseCertificateBundle(CertificateBundle& bundle)
 {
     LOG("ParseCertificateBundle");
@@ -433,6 +546,7 @@ HRESULT CertificateHelper::ImportCertificateForPKINIT(CertificateBundle& bundle)
     return S_OK;
 }
 
+
 HRESULT CertificateHelper::BuildCertificateLogon(
     const CertificateBundle& bundle,
     BYTE** ppPackage,
@@ -452,14 +566,21 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     HRESULT hr = E_FAIL;
 
     // ========================================================================
-    // Step 1: Export the private key as BCRYPT_RSAPRIVATE_BLOB
+    // Step 1: Get the private key blob
     // ========================================================================
 
     std::vector<BYTE> privateKeyBlob;
 
-    if (bundle.hKey)
+    // First check if we already have the blob from ParsePfxBundle
+    if (!bundle.privateKeyBlob.empty())
     {
-        // Export from NCrypt handle
+        LOG("Using pre-extracted private key blob: %d bytes", (int)bundle.privateKeyBlob.size());
+        privateKeyBlob = bundle.privateKeyBlob;
+    }
+    else if (bundle.hKey)
+    {
+        // Try to export from NCrypt handle
+        LOG("Trying to export from NCrypt handle");
         DWORD cbKeyBlob = 0;
         SECURITY_STATUS status = NCryptExportKey(
             bundle.hKey,
@@ -494,11 +615,15 @@ HRESULT CertificateHelper::BuildCertificateLogon(
                 LOG("Exported private key: %d bytes", cbKeyBlob);
             }
         }
+        else
+        {
+            LOG("NCryptExportKey size query failed: 0x%08x", status);
+        }
     }
 
     if (privateKeyBlob.empty())
     {
-        LOG("Failed to export private key blob");
+        LOG("Failed to get private key blob");
         return E_FAIL;
     }
 
@@ -642,7 +767,6 @@ HRESULT CertificateHelper::BuildCertificateLogon(
 
     return S_OK;
 }
-
 HRESULT CertificateHelper::BuildCspInfo(
     const std::wstring& containerName,
     const std::wstring& providerName,
@@ -1026,3 +1150,4 @@ HRESULT CertificateHelper_CreateInstance(CertificateHelper** ppHelper)
 
     return S_OK;
 }
+
