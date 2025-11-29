@@ -28,10 +28,6 @@ Write-Host ""
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://+:$Port/")
 
-# For HTTPS, you'd need to bind a certificate:
-# netsh http add sslcert ipport=0.0.0.0:8443 certhash=<thumbprint> appid={...}
-# $listener.Prefixes.Add("https://+:$Port/")
-
 try {
     $listener.Start()
     Write-Host "Service started on port $Port" -ForegroundColor Green
@@ -54,18 +50,23 @@ function Issue-SmartcardCertificate {
     
     Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Issuing cert for $Username ($UPN)" -ForegroundColor Yellow
     
-    $tempDir = [System.IO.Path]::GetTempPath()
+    $tempDir = "C:\temp"
+    if (-not (Test-Path $tempDir)) {
+        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+    }
+    
     $requestId = [System.Guid]::NewGuid().ToString("N").Substring(0, 8)
     $infFile = Join-Path $tempDir "certreq_$requestId.inf"
     $reqFile = Join-Path $tempDir "certreq_$requestId.req"
     $cerFile = Join-Path $tempDir "certreq_$requestId.cer"
+    $rspFile = Join-Path $tempDir "certreq_$requestId.rsp"
     $pfxFile = Join-Path $tempDir "certreq_$requestId.pfx"
     
     try {
         # Create INF file for certificate request
         $infContent = @"
 [Version]
-Signature="`$Windows NT$"
+Signature="`$Windows NT`$"
 
 [NewRequest]
 Subject = "CN=$Username"
@@ -88,40 +89,89 @@ CertificateTemplate = $CertTemplate
 "@
         
         $infContent | Out-File -FilePath $infFile -Encoding ASCII
+        Write-Host "  Created INF file: $infFile" -ForegroundColor Gray
         
         # Generate certificate request
-        $result = & certreq -new -q $infFile $reqFile 2>&1
+        $output = & certreq -new -q $infFile $reqFile 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "certreq -new failed: $result"
+            throw "certreq -new failed: $output"
         }
+        Write-Host "  Created request file: $reqFile" -ForegroundColor Gray
         
         # Submit to CA
-        $result = & certreq -submit -q -config $CAConfig $reqFile $cerFile 2>&1
+        $output = & certreq -submit -q -config $CAConfig $reqFile $cerFile 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "certreq -submit failed: $result"
+            throw "certreq -submit failed: $output"
         }
+        Write-Host "  Certificate issued: $cerFile" -ForegroundColor Gray
         
         # Accept the certificate (links with private key)
-        $result = & certreq -accept -q $cerFile 2>&1
+        $output = & certreq -accept -q $cerFile 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "certreq -accept failed: $result"
+            throw "certreq -accept failed: $output"
         }
+        Write-Host "  Certificate accepted" -ForegroundColor Gray
         
-        # Find the certificate we just installed
-        Start-Sleep -Milliseconds 500
-        $cert = Get-ChildItem -Path Cert:\CurrentUser\My | 
-                Where-Object { $_.Subject -eq "CN=$Username" } |
+        # Wait a moment for the cert store to update
+        Start-Sleep -Seconds 1
+        
+        # Find the certificate we just installed - search by subject
+        $searchName = "CN=$Username"
+        Write-Host "  Searching for certificate with subject: $searchName" -ForegroundColor Gray
+        
+        # Try CurrentUser store first
+        $cert = Get-ChildItem -Path Cert:\CurrentUser\My -ErrorAction SilentlyContinue | 
+                Where-Object { $_.Subject -eq $searchName } |
                 Sort-Object NotBefore -Descending |
                 Select-Object -First 1
         
+        # If not found, try LocalMachine store
         if (-not $cert) {
+            Write-Host "  Not found in CurrentUser, trying LocalMachine..." -ForegroundColor Gray
+            $cert = Get-ChildItem -Path Cert:\LocalMachine\My -ErrorAction SilentlyContinue | 
+                    Where-Object { $_.Subject -eq $searchName } |
+                    Sort-Object NotBefore -Descending |
+                    Select-Object -First 1
+        }
+        
+        # If still not found, try matching by thumbprint from the cer file
+        if (-not $cert) {
+            Write-Host "  Trying to find by parsing certificate file..." -ForegroundColor Gray
+            $cerContent = Get-Content $cerFile -Raw
+            $tempCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cerFile)
+            $expectedThumbprint = $tempCert.Thumbprint
+            Write-Host "  Looking for thumbprint: $expectedThumbprint" -ForegroundColor Gray
+            
+            $cert = Get-ChildItem -Path Cert:\CurrentUser\My -ErrorAction SilentlyContinue | 
+                    Where-Object { $_.Thumbprint -eq $expectedThumbprint }
+            
+            if (-not $cert) {
+                $cert = Get-ChildItem -Path Cert:\LocalMachine\My -ErrorAction SilentlyContinue | 
+                        Where-Object { $_.Thumbprint -eq $expectedThumbprint }
+            }
+        }
+        
+        if (-not $cert) {
+            # List all certs for debugging
+            Write-Host "  Listing all CurrentUser\My certificates:" -ForegroundColor Yellow
+            Get-ChildItem -Path Cert:\CurrentUser\My | ForEach-Object {
+                Write-Host "    - $($_.Subject) [$($_.Thumbprint.Substring(0,8))...] HasKey:$($_.HasPrivateKey)" -ForegroundColor Gray
+            }
             throw "Certificate not found in store after accept"
+        }
+        
+        Write-Host "  Found certificate: $($cert.Thumbprint)" -ForegroundColor Gray
+        
+        if (-not $cert.HasPrivateKey) {
+            throw "Certificate found but has no private key"
         }
         
         # Export to PFX with a random password
         $pfxPassword = [System.Guid]::NewGuid().ToString("N").Substring(0, 16)
         $securePassword = ConvertTo-SecureString -String $pfxPassword -Force -AsPlainText
+        
         Export-PfxCertificate -Cert $cert -FilePath $pfxFile -Password $securePassword | Out-Null
+        Write-Host "  Exported PFX: $pfxFile" -ForegroundColor Gray
         
         # Read PFX as base64
         $pfxBytes = [System.IO.File]::ReadAllBytes($pfxFile)
@@ -132,8 +182,20 @@ CertificateTemplate = $CertTemplate
         $certBase64 = [System.Convert]::ToBase64String($certBytes, [System.Base64FormattingOptions]::InsertLineBreaks)
         $certPem = "-----BEGIN CERTIFICATE-----`n$certBase64`n-----END CERTIFICATE-----"
         
-        # Remove certificate from store (we don't need it here)
-        $cert | Remove-Item -Force
+        # Store the thumbprint before removing
+        $thumbprint = $cert.Thumbprint
+        $notBefore = $cert.NotBefore.ToString("o")
+        $notAfter = $cert.NotAfter.ToString("o")
+        $subject = $cert.Subject
+        
+        # Remove certificate from store (we don't need it here, the client will import the PFX)
+        try {
+            $cert | Remove-Item -Force -ErrorAction SilentlyContinue
+            Write-Host "  Removed certificate from store" -ForegroundColor Gray
+        }
+        catch {
+            Write-Host "  Warning: Could not remove certificate from store: $_" -ForegroundColor Yellow
+        }
         
         Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - Certificate issued successfully" -ForegroundColor Green
         
@@ -142,10 +204,10 @@ CertificateTemplate = $CertTemplate
             certificate_pem = $certPem
             pfx_base64 = $pfxBase64
             pfx_password = $pfxPassword
-            thumbprint = $cert.Thumbprint
-            not_before = $cert.NotBefore.ToString("o")
-            not_after = $cert.NotAfter.ToString("o")
-            subject = $cert.Subject
+            thumbprint = $thumbprint
+            not_before = $notBefore
+            not_after = $notAfter
+            subject = $subject
             upn = $UPN
         }
     }
@@ -158,8 +220,10 @@ CertificateTemplate = $CertTemplate
     }
     finally {
         # Cleanup temp files
-        @($infFile, $reqFile, $cerFile, $pfxFile) | ForEach-Object {
-            if (Test-Path $_) { Remove-Item $_ -Force -ErrorAction SilentlyContinue }
+        @($infFile, $reqFile, $cerFile, $rspFile, $pfxFile) | ForEach-Object {
+            if ($_ -and (Test-Path $_)) { 
+                Remove-Item $_ -Force -ErrorAction SilentlyContinue 
+            }
         }
     }
 }
