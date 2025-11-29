@@ -1,8 +1,9 @@
 // AuthentikKSP.h
 // Authentik Key Storage Provider for PKINIT authentication
 //
-// This KSP allows Windows to use certificates issued by Authentik for domain logon
-// without requiring a physical smart card or TPM.
+// PURE C IMPLEMENTATION - No C++ STL objects
+// This avoids blue screens caused by C++ runtime not being initialized
+// when the KSP is loaded early during Windows boot.
 
 #ifndef AUTHENTIK_KSP_H
 #define AUTHENTIK_KSP_H
@@ -11,52 +12,75 @@
 #include <ncrypt.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
-#include <string>
-#include <map>
-#include <vector>
 
 // Include shared memory structures
 #include "../Shared/SharedMemory.h"
 
 // ============================================================================
-// Internal Handle Structures
+// NTSTATUS Codes (avoid including ntstatus.h which conflicts with windows.h)
+// ============================================================================
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS                  ((NTSTATUS)0x00000000L)
+#endif
+#ifndef STATUS_INVALID_PARAMETER
+#define STATUS_INVALID_PARAMETER        ((NTSTATUS)0xC000000DL)
+#endif
+#ifndef STATUS_BUFFER_TOO_SMALL
+#define STATUS_BUFFER_TOO_SMALL         ((NTSTATUS)0xC0000023L)
+#endif
+
+// ============================================================================
+// Internal Handle Structures - PURE C, no STL
 // ============================================================================
 
 // Magic values for handle validation
 #define AUTHENTIK_PROVIDER_MAGIC    0x50565250  // "PRVP"
 #define AUTHENTIK_KEY_HANDLE_MAGIC  0x4B455948  // "KEYH"
 
-// Internal key handle structure
+// Maximum sizes for fixed buffers
+#define MAX_CONTAINER_NAME  256
+#define MAX_USER_NAME       256
+#define MAX_KEY_BLOB_SIZE   4096
+#define MAX_CERT_BLOB_SIZE  8192
+
+// Internal key handle structure - FIXED SIZE, NO STL
 typedef struct _AUTHENTIK_KEY {
-    DWORD dwMagic;                      // Must be AUTHENTIK_KEY_HANDLE_MAGIC
-    NCRYPT_PROV_HANDLE hProvider;       // Parent provider
-    std::wstring containerName;         // Key container name
-    std::wstring userName;              // Associated user
-    DWORD dwKeySpec;                    // Key specification
-    DWORD dwFlags;                      // Key flags
-    std::vector<BYTE> privateKeyBlob;   // BCRYPT_RSAPRIVATE_BLOB
-    std::vector<BYTE> certificateBlob;  // DER-encoded certificate
-    BCRYPT_KEY_HANDLE hBCryptKey;       // BCrypt key handle for operations
+    DWORD dwMagic;                              // Must be AUTHENTIK_KEY_HANDLE_MAGIC
+    NCRYPT_PROV_HANDLE hProvider;               // Parent provider
+    WCHAR wszContainerName[MAX_CONTAINER_NAME]; // Key container name
+    WCHAR wszUserName[MAX_USER_NAME];           // Associated user
+    DWORD dwKeySpec;                            // Key specification
+    DWORD dwFlags;                              // Key flags
+    BYTE  rgbPrivateKeyBlob[MAX_KEY_BLOB_SIZE]; // BCRYPT_RSAPRIVATE_BLOB
+    DWORD cbPrivateKeyBlob;                     // Actual size
+    BYTE  rgbCertificateBlob[MAX_CERT_BLOB_SIZE]; // DER-encoded certificate
+    DWORD cbCertificateBlob;                    // Actual size
+    BCRYPT_KEY_HANDLE hBCryptKey;               // BCrypt key handle for operations
 } AUTHENTIK_KEY, *PAUTHENTIK_KEY;
 
-// Internal provider handle structure
+// Internal provider handle structure - FIXED SIZE, NO STL
 typedef struct _AUTHENTIK_PROVIDER {
-    DWORD dwMagic;                      // Must be AUTHENTIK_PROVIDER_MAGIC
-    DWORD dwFlags;                      // Provider flags
-    std::map<std::wstring, PAUTHENTIK_KEY> keys;  // Opened keys
+    DWORD dwMagic;                              // Must be AUTHENTIK_PROVIDER_MAGIC
+    DWORD dwFlags;                              // Provider flags
 } AUTHENTIK_PROVIDER, *PAUTHENTIK_PROVIDER;
 
 // ============================================================================
 // KSP Function Table
 // ============================================================================
 
-// Get the KSP function table
-// Note: The actual function is defined in AuthentikKSPDll.cpp with PVOID*
-// to avoid dependency on the SDK's NCRYPT_KEY_STORAGE_FUNCTION_TABLE definition
-extern "C" __declspec(dllexport) NTSTATUS WINAPI GetKeyStorageInterface(
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+__declspec(dllexport) NTSTATUS WINAPI GetKeyStorageInterface(
     _In_ LPCWSTR pszProviderName,
     _Out_ PVOID* ppFunctionTable,
     _In_ DWORD dwFlags);
+
+#ifdef __cplusplus
+}
+#endif
 
 // ============================================================================
 // NCrypt Provider Functions
