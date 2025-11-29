@@ -1,5 +1,6 @@
 // CertificateHelper.h
 // Certificate parsing, import, and management for PKINIT authentication
+// Updated to use Authentik KSP for key storage
 
 #pragma once
 
@@ -14,6 +15,9 @@
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "NCrypt.lib")
 #pragma comment(lib, "BCrypt.lib")
+
+// KSP Provider Name - must match AuthentikKSP registration
+#define AUTHENTIK_KSP_NAME L"Authentik Key Storage Provider"
 
 // Certificate bundle received from Authentik/Cert Issuer
 struct CertificateBundle
@@ -143,6 +147,8 @@ public:
         CertificateBundle& bundle);
 
     // Build KERB_CERTIFICATE_LOGON structure for serialization
+    // This method stores the key in the KSP's shared memory
+    // and references the Authentik KSP in the CSP info
     HRESULT BuildCertificateLogon(
         const CertificateBundle& bundle,
         BYTE** ppPackage,
@@ -157,6 +163,9 @@ public:
 
     // Clean up certificate handles
     void CleanupCertificate(CertificateBundle& bundle);
+    
+    // Get the container name for this session
+    const std::wstring& GetContainerName() const { return _containerName; }
 
 private:
     // Convert PEM to DER
@@ -190,7 +199,7 @@ private:
         const std::wstring& base64,
         std::vector<BYTE>& decoded);
 
-    // Storage provider for ephemeral keys
+    // Storage provider for ephemeral keys (used during parsing)
     NCRYPT_PROV_HANDLE _hProvider;
     
     // Container name for this session
