@@ -1,7 +1,7 @@
 // resource.rc
-// Resource file for Authentik Credential Provider
+// Simple resource file for Authentik Credential Provider icon
 
-#include "resource.h"
+#include <windows.h>
 
-// Tile icon (48x48)
-IDI_AUTHENTIK_ICON ICON "resources\\authentik.ico"
+// Tile icon - ID 101
+101 ICON "resources\\authentik.ico"
