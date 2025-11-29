@@ -5,6 +5,7 @@
 #include "Logger.h"
 #include "CertificateHelper.h"
 #include "AuthentikAPI.h"
+#include "resource.h"
 #include <shlwapi.h>
 #include <new>
 
@@ -12,9 +13,6 @@
 
 // External DLL instance
 extern HINSTANCE g_hinst;
-
-// Resource ID for tile icon (add icon.ico to project as resource 101)
-#define IDI_TILE_ICON 101
 
 // Field state pairs for different usage scenarios
 static const FIELD_STATE_PAIR s_rgFieldStatePairsUnlock[] =
@@ -34,7 +32,8 @@ CAuthentikCredential::CAuthentikCredential() :
     _pCredentialEvents(NULL),
     _currentStep(AuthStep::STEP_USERNAME),
     _pAuthentikAPI(NULL),
-    _pCertHelper(NULL)
+    _pCertHelper(NULL),
+    _hTileIcon(NULL)
 {
     DllAddRef();
     LOG("CAuthentikCredential::Constructor");
@@ -47,6 +46,9 @@ CAuthentikCredential::CAuthentikCredential() :
     
     // Initialize certificate helper
     CertificateHelper_CreateInstance(&_pCertHelper);
+    
+    // Load tile icon from DLL resources
+    _LoadTileIcon();
 }
 
 // Destructor
@@ -78,8 +80,55 @@ CAuthentikCredential::~CAuthentikCredential()
         delete _pCertHelper;
         _pCertHelper = NULL;
     }
+    
+    // Note: Don't delete _hTileIcon - it's owned by the system after GetBitmapValue returns it
 
     DllRelease();
+}
+
+// Load tile icon from resources
+void CAuthentikCredential::_LoadTileIcon()
+{
+    LOG("Loading tile icon from resources");
+    
+    // Load icon from DLL resource
+    HICON hIcon = (HICON)LoadImageW(
+        g_hinst,
+        MAKEINTRESOURCEW(IDI_AUTHENTIK_ICON),
+        IMAGE_ICON,
+        0, 0,  // Use actual size
+        LR_DEFAULTCOLOR | LR_SHARED);
+    
+    if (hIcon)
+    {
+        LOG("Icon loaded successfully");
+        
+        // Convert icon to bitmap for credential provider
+        ICONINFO iconInfo = {0};
+        if (GetIconInfo(hIcon, &iconInfo))
+        {
+            // Use the color bitmap
+            _hTileIcon = iconInfo.hbmColor;
+            
+            // Clean up the mask bitmap
+            if (iconInfo.hbmMask)
+            {
+                DeleteObject(iconInfo.hbmMask);
+            }
+            
+            LOG("Icon converted to bitmap");
+        }
+        else
+        {
+            LOG("Failed to get icon info: %d", GetLastError());
+        }
+        
+        // Don't destroy the icon if loaded with LR_SHARED
+    }
+    else
+    {
+        LOG("Failed to load icon: %d", GetLastError());
+    }
 }
 
 // IUnknown
@@ -250,35 +299,28 @@ HRESULT CAuthentikCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
     
     if (dwFieldID == FID_LOGO && phbmp)
     {
-        // Try to load custom icon from DLL resources
-        HICON hIcon = (HICON)LoadImageW(
-            g_hinst,
-            MAKEINTRESOURCEW(IDI_TILE_ICON),
-            IMAGE_ICON,
-            48, 48,  // Size for tile icon
-            LR_DEFAULTCOLOR);
-        
-        if (hIcon)
+        if (_hTileIcon)
         {
-            // Convert icon to bitmap
-            ICONINFO iconInfo;
-            if (GetIconInfo(hIcon, &iconInfo))
+            // Return a copy of the bitmap
+            // The credential provider system will take ownership
+            *phbmp = (HBITMAP)CopyImage(_hTileIcon, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
+            if (*phbmp)
             {
-                *phbmp = iconInfo.hbmColor;
-                if (iconInfo.hbmMask)
-                {
-                    DeleteObject(iconInfo.hbmMask);
-                }
+                LOG("Returning tile icon bitmap");
                 hr = S_OK;
             }
-            DestroyIcon(hIcon);
+            else
+            {
+                LOG("Failed to copy bitmap: %d", GetLastError());
+                *phbmp = NULL;
+                hr = E_FAIL;
+            }
         }
-        
-        if (FAILED(hr))
+        else
         {
-            // No custom icon - return NULL to use default
+            LOG("No tile icon loaded, returning NULL");
             *phbmp = NULL;
-            hr = S_OK;
+            hr = S_OK; // NULL is acceptable - will use default icon
         }
     }
     
@@ -382,6 +424,16 @@ HRESULT CAuthentikCredential::GetSerialization(
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
     LOG("CAuthentikCredential::GetSerialization - Step: %d", (int)_currentStep);
+
+    // Check configuration first
+    if (_pAuthentikAPI && !_pAuthentikAPI->IsConfigurationValid())
+    {
+        LOG("Configuration error: %S", _pAuthentikAPI->GetConfigurationError().c_str());
+        SHStrDupW(_pAuthentikAPI->GetConfigurationError().c_str(), ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+        return S_FALSE;
+    }
 
     HRESULT hr = E_FAIL;
 
@@ -496,6 +548,14 @@ HRESULT CAuthentikCredential::_HandleUsernameStep(
         LOG("Server error");
         std::wstring msg = L"Server error: " + response.message;
         SHStrDupW(msg.c_str(), ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+        return S_FALSE;
+    }
+    else if (response.status == AuthStatus::ERROR_CONFIG)
+    {
+        LOG("Configuration error");
+        SHStrDupW(response.message.c_str(), ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         return S_FALSE;
