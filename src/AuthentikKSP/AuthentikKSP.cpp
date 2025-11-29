@@ -1,23 +1,28 @@
 // AuthentikKSP.cpp
-// Minimal safe KSP - defers ALL initialization until actually needed
+// Authentik Key Storage Provider - PURE C IMPLEMENTATION
+//
+// This version uses NO C++ STL objects (no std::string, std::vector, std::map)
+// to avoid blue screens when the KSP is loaded early during Windows boot
+// before the C++ runtime is fully initialized.
+//
+// All memory is allocated using HeapAlloc from the process heap.
 
 #include "AuthentikKSP.h"
 #include <stdio.h>
-#include <new>
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "crypt32.lib")
 
 // ============================================================================
-// Safe Logging
+// Safe Logging - wrapped in SEH
 // ============================================================================
 
 static void SafeLog(const char* msg)
 {
-    __try { 
-        OutputDebugStringA(msg); 
-    } __except(EXCEPTION_EXECUTE_HANDLER) { 
+    __try {
+        OutputDebugStringA(msg);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
     }
 }
 
@@ -44,7 +49,7 @@ static volatile LONG g_bInitAttempted = 0;
 // Lazy Initialization - Only called when actually needed
 // ============================================================================
 
-static BOOL TryInitializeKeyStore()
+static BOOL TryInitializeKeyStore(void)
 {
     // Only try once
     if (InterlockedCompareExchange(&g_bInitAttempted, 1, 0) != 0)
@@ -54,7 +59,7 @@ static BOOL TryInitializeKeyStore()
 
     __try
     {
-        SafeLog("[AuthentikKSP] TryInitializeKeyStore\n");
+        SafeLog("[AuthentikKSP] TryInitializeKeyStore");
 
         // Try Global, then Local namespace
         g_hMutex = CreateMutexW(NULL, FALSE, L"Global\\AuthentikKSPMutex");
@@ -68,7 +73,7 @@ static BOOL TryInitializeKeyStore()
         if (!g_hSharedMem)
             g_hSharedMem = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                 0, AUTHENTIK_SHARED_MEM_SIZE, L"Local\\AuthentikKSPKeyStore");
-        
+
         BOOL bCreated = (GetLastError() != ERROR_ALREADY_EXISTS);
         if (!g_hSharedMem) return FALSE;
 
@@ -86,20 +91,20 @@ static BOOL TryInitializeKeyStore()
             ReleaseMutex(g_hMutex);
         }
 
-        SafeLog("[AuthentikKSP] KeyStore initialized\n");
+        SafeLog("[AuthentikKSP] KeyStore initialized");
         return TRUE;
     }
     __except(EXCEPTION_EXECUTE_HANDLER)
     {
-        SafeLog("[AuthentikKSP] EXCEPTION in TryInitializeKeyStore\n");
+        SafeLog("[AuthentikKSP] EXCEPTION in TryInitializeKeyStore");
         return FALSE;
     }
 }
 
-static BOOL TryInitializeRsa()
+static BOOL TryInitializeRsa(void)
 {
     if (g_hRsaAlg) return TRUE;
-    
+
     __try
     {
         NTSTATUS status = BCryptOpenAlgorithmProvider(&g_hRsaAlg, BCRYPT_RSA_ALGORITHM, NULL, 0);
@@ -169,12 +174,12 @@ static PAUTHENTIK_KEY_ENTRY FindKeyEntry(LPCWSTR wszContainerName)
         ReleaseMutex(g_hMutex);
     }
     __except(EXCEPTION_EXECUTE_HANDLER) { }
-    
+
     return NULL;
 }
 
 // ============================================================================
-// NCrypt Provider Functions
+// NCrypt Provider Functions - Using HeapAlloc, no C++ new operator
 // ============================================================================
 
 SECURITY_STATUS WINAPI AuthentikKSPOpenProvider(
@@ -182,16 +187,21 @@ SECURITY_STATUS WINAPI AuthentikKSPOpenProvider(
     _In_opt_ LPCWSTR pszProviderName,
     _In_ DWORD dwFlags)
 {
-    SafeLog("[AuthentikKSP] OpenProvider\n");
+    UNREFERENCED_PARAMETER(pszProviderName);
+    
+    SafeLog("[AuthentikKSP] OpenProvider");
 
     if (!phProvider) return NTE_INVALID_PARAMETER;
     *phProvider = 0;
 
     // DON'T initialize key store here - defer until OpenKey
-    
+    // Just allocate provider handle using HeapAlloc (safe at boot time)
+
     __try
     {
-        PAUTHENTIK_PROVIDER pProvider = new(std::nothrow) AUTHENTIK_PROVIDER;
+        PAUTHENTIK_PROVIDER pProvider = (PAUTHENTIK_PROVIDER)HeapAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(AUTHENTIK_PROVIDER));
+        
         if (!pProvider) return NTE_NO_MEMORY;
 
         pProvider->dwMagic = AUTHENTIK_PROVIDER_MAGIC;
@@ -213,6 +223,8 @@ SECURITY_STATUS WINAPI AuthentikKSPOpenKey(
     _In_opt_ DWORD dwLegacyKeySpec,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(dwLegacyKeySpec);
+    
     KSP_LOG("OpenKey: %S", pszKeyName ? pszKeyName : L"(null)");
 
     if (!ValidateProviderHandle(hProvider)) return NTE_INVALID_HANDLE;
@@ -235,38 +247,49 @@ SECURITY_STATUS WINAPI AuthentikKSPOpenKey(
             return NTE_BAD_KEYSET;
         }
 
-        PAUTHENTIK_KEY pKey = new(std::nothrow) AUTHENTIK_KEY;
+        // Validate sizes before copying
+        if (pEntry->cbPrivateKey > MAX_KEY_BLOB_SIZE ||
+            pEntry->cbCertificate > MAX_CERT_BLOB_SIZE)
+        {
+            KSP_LOG("OpenKey: Key/cert too large");
+            return NTE_BAD_KEY;
+        }
+
+        // Allocate key handle using HeapAlloc
+        PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)HeapAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(AUTHENTIK_KEY));
+        
         if (!pKey) return NTE_NO_MEMORY;
 
         pKey->dwMagic = AUTHENTIK_KEY_HANDLE_MAGIC;
         pKey->hProvider = hProvider;
-        pKey->containerName = pszKeyName;
-        pKey->userName = pEntry->wszUserName;
+        wcscpy_s(pKey->wszContainerName, MAX_CONTAINER_NAME, pszKeyName);
+        wcscpy_s(pKey->wszUserName, MAX_USER_NAME, pEntry->wszUserName);
         pKey->dwKeySpec = pEntry->dwKeySpec;
         pKey->dwFlags = dwFlags;
         pKey->hBCryptKey = NULL;
 
-        // Copy key and cert data
-        pKey->privateKeyBlob.resize(pEntry->cbPrivateKey);
-        memcpy(pKey->privateKeyBlob.data(), pEntry->rgbData, pEntry->cbPrivateKey);
+        // Copy key and cert data into fixed-size buffers
+        pKey->cbPrivateKeyBlob = pEntry->cbPrivateKey;
+        memcpy(pKey->rgbPrivateKeyBlob, pEntry->rgbData, pEntry->cbPrivateKey);
 
-        pKey->certificateBlob.resize(pEntry->cbCertificate);
-        memcpy(pKey->certificateBlob.data(), pEntry->rgbData + pEntry->cbPrivateKey, pEntry->cbCertificate);
+        pKey->cbCertificateBlob = pEntry->cbCertificate;
+        memcpy(pKey->rgbCertificateBlob, pEntry->rgbData + pEntry->cbPrivateKey, pEntry->cbCertificate);
 
         // Import to BCrypt
         if (!TryInitializeRsa())
         {
-            delete pKey;
+            HeapFree(GetProcessHeap(), 0, pKey);
             return NTE_PROVIDER_DLL_FAIL;
         }
 
         NTSTATUS status = BCryptImportKeyPair(g_hRsaAlg, NULL, BCRYPT_RSAPRIVATE_BLOB,
-            &pKey->hBCryptKey, pKey->privateKeyBlob.data(), (ULONG)pKey->privateKeyBlob.size(), 0);
+            &pKey->hBCryptKey, pKey->rgbPrivateKeyBlob, pKey->cbPrivateKeyBlob, 0);
 
         if (!BCRYPT_SUCCESS(status))
         {
             KSP_LOG("BCryptImportKeyPair failed: 0x%08x", status);
-            delete pKey;
+            HeapFree(GetProcessHeap(), 0, pKey);
             return NTE_BAD_KEY;
         }
 
@@ -288,6 +311,12 @@ SECURITY_STATUS WINAPI AuthentikKSPCreatePersistedKey(
     _In_ DWORD dwLegacyKeySpec,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(phKey);
+    UNREFERENCED_PARAMETER(pszAlgId);
+    UNREFERENCED_PARAMETER(pszKeyName);
+    UNREFERENCED_PARAMETER(dwLegacyKeySpec);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -299,6 +328,8 @@ SECURITY_STATUS WINAPI AuthentikKSPGetProviderProperty(
     _Out_ DWORD* pcbResult,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(dwFlags);
+    
     if (!ValidateProviderHandle(hProvider)) return NTE_INVALID_HANDLE;
     if (!pszProperty || !pcbResult) return NTE_INVALID_PARAMETER;
 
@@ -337,66 +368,92 @@ SECURITY_STATUS WINAPI AuthentikKSPGetKeyProperty(
     _Out_ DWORD* pcbResult,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(dwFlags);
+    
     if (!ValidateKeyHandle(hKey)) return NTE_INVALID_HANDLE;
     if (!pszProperty || !pcbResult) return NTE_INVALID_PARAMETER;
 
     PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
     KSP_LOG("GetKeyProperty: %S", pszProperty);
 
-    __try
+    if (wcscmp(pszProperty, NCRYPT_NAME_PROPERTY) == 0)
     {
-        if (wcscmp(pszProperty, NCRYPT_CERTIFICATE_PROPERTY) == 0)
+        *pcbResult = (DWORD)((wcslen(pKey->wszContainerName) + 1) * sizeof(WCHAR));
+        if (pbOutput)
         {
-            *pcbResult = (DWORD)pKey->certificateBlob.size();
-            if (pbOutput)
-            {
-                if (cbOutput < *pcbResult) return NTE_BUFFER_TOO_SMALL;
-                memcpy(pbOutput, pKey->certificateBlob.data(), pKey->certificateBlob.size());
-            }
-            return ERROR_SUCCESS;
+            if (cbOutput < *pcbResult) return NTE_BUFFER_TOO_SMALL;
+            wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), pKey->wszContainerName);
         }
-        else if (wcscmp(pszProperty, NCRYPT_NAME_PROPERTY) == 0)
-        {
-            *pcbResult = (DWORD)((pKey->containerName.length() + 1) * sizeof(WCHAR));
-            if (pbOutput)
-            {
-                if (cbOutput < *pcbResult) return NTE_BUFFER_TOO_SMALL;
-                wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), pKey->containerName.c_str());
-            }
-            return ERROR_SUCCESS;
-        }
-        else if (wcscmp(pszProperty, NCRYPT_KEY_USAGE_PROPERTY) == 0)
-        {
-            *pcbResult = sizeof(DWORD);
-            if (pbOutput)
-            {
-                if (cbOutput < sizeof(DWORD)) return NTE_BUFFER_TOO_SMALL;
-                *(DWORD*)pbOutput = NCRYPT_ALLOW_SIGNING_FLAG;
-            }
-            return ERROR_SUCCESS;
-        }
-        else if (wcscmp(pszProperty, NCRYPT_ALGORITHM_PROPERTY) == 0)
-        {
-            *pcbResult = (DWORD)((wcslen(BCRYPT_RSA_ALGORITHM) + 1) * sizeof(WCHAR));
-            if (pbOutput)
-            {
-                if (cbOutput < *pcbResult) return NTE_BUFFER_TOO_SMALL;
-                wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), BCRYPT_RSA_ALGORITHM);
-            }
-            return ERROR_SUCCESS;
-        }
-        else if (wcscmp(pszProperty, NCRYPT_LENGTH_PROPERTY) == 0)
-        {
-            *pcbResult = sizeof(DWORD);
-            if (pbOutput)
-            {
-                if (cbOutput < sizeof(DWORD)) return NTE_BUFFER_TOO_SMALL;
-                *(DWORD*)pbOutput = 2048;
-            }
-            return ERROR_SUCCESS;
-        }
+        return ERROR_SUCCESS;
     }
-    __except(EXCEPTION_EXECUTE_HANDLER) { return NTE_FAIL; }
+    else if (wcscmp(pszProperty, NCRYPT_ALGORITHM_PROPERTY) == 0)
+    {
+        *pcbResult = (DWORD)((wcslen(BCRYPT_RSA_ALGORITHM) + 1) * sizeof(WCHAR));
+        if (pbOutput)
+        {
+            if (cbOutput < *pcbResult) return NTE_BUFFER_TOO_SMALL;
+            wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), BCRYPT_RSA_ALGORITHM);
+        }
+        return ERROR_SUCCESS;
+    }
+    else if (wcscmp(pszProperty, NCRYPT_LENGTH_PROPERTY) == 0)
+    {
+        *pcbResult = sizeof(DWORD);
+        if (pbOutput)
+        {
+            if (cbOutput < sizeof(DWORD)) return NTE_BUFFER_TOO_SMALL;
+            // Get key length from BCrypt
+            DWORD dwKeyLength = 0;
+            ULONG cbResult = 0;
+            if (pKey->hBCryptKey)
+            {
+                BCryptGetProperty(pKey->hBCryptKey, BCRYPT_KEY_LENGTH, (PUCHAR)&dwKeyLength, sizeof(DWORD), &cbResult, 0);
+            }
+            *(DWORD*)pbOutput = dwKeyLength;
+        }
+        return ERROR_SUCCESS;
+    }
+    else if (wcscmp(pszProperty, NCRYPT_CERTIFICATE_PROPERTY) == 0)
+    {
+        *pcbResult = pKey->cbCertificateBlob;
+        if (pbOutput)
+        {
+            if (cbOutput < pKey->cbCertificateBlob) return NTE_BUFFER_TOO_SMALL;
+            memcpy(pbOutput, pKey->rgbCertificateBlob, pKey->cbCertificateBlob);
+        }
+        return ERROR_SUCCESS;
+    }
+    else if (wcscmp(pszProperty, NCRYPT_EXPORT_POLICY_PROPERTY) == 0)
+    {
+        *pcbResult = sizeof(DWORD);
+        if (pbOutput)
+        {
+            if (cbOutput < sizeof(DWORD)) return NTE_BUFFER_TOO_SMALL;
+            *(DWORD*)pbOutput = 0; // No export allowed
+        }
+        return ERROR_SUCCESS;
+    }
+    else if (wcscmp(pszProperty, NCRYPT_KEY_USAGE_PROPERTY) == 0)
+    {
+        *pcbResult = sizeof(DWORD);
+        if (pbOutput)
+        {
+            if (cbOutput < sizeof(DWORD)) return NTE_BUFFER_TOO_SMALL;
+            *(DWORD*)pbOutput = NCRYPT_ALLOW_SIGNING_FLAG | NCRYPT_ALLOW_DECRYPT_FLAG;
+        }
+        return ERROR_SUCCESS;
+    }
+    else if (wcscmp(pszProperty, NCRYPT_UNIQUE_NAME_PROPERTY) == 0)
+    {
+        *pcbResult = (DWORD)((wcslen(pKey->wszContainerName) + 1) * sizeof(WCHAR));
+        if (pbOutput)
+        {
+            if (cbOutput < *pcbResult) return NTE_BUFFER_TOO_SMALL;
+            wcscpy_s((LPWSTR)pbOutput, cbOutput / sizeof(WCHAR), pKey->wszContainerName);
+        }
+        return ERROR_SUCCESS;
+    }
 
     return NTE_NOT_SUPPORTED;
 }
@@ -408,6 +465,11 @@ SECURITY_STATUS WINAPI AuthentikKSPSetProviderProperty(
     _In_ DWORD cbInput,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(pszProperty);
+    UNREFERENCED_PARAMETER(pbInput);
+    UNREFERENCED_PARAMETER(cbInput);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -419,6 +481,12 @@ SECURITY_STATUS WINAPI AuthentikKSPSetKeyProperty(
     _In_ DWORD cbInput,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hKey);
+    UNREFERENCED_PARAMETER(pszProperty);
+    UNREFERENCED_PARAMETER(pbInput);
+    UNREFERENCED_PARAMETER(cbInput);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -427,6 +495,9 @@ SECURITY_STATUS WINAPI AuthentikKSPFinalizeKey(
     _In_ NCRYPT_KEY_HANDLE hKey,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hKey);
+    UNREFERENCED_PARAMETER(dwFlags);
     return ERROR_SUCCESS;
 }
 
@@ -435,23 +506,33 @@ SECURITY_STATUS WINAPI AuthentikKSPDeleteKey(
     _Inout_ NCRYPT_KEY_HANDLE hKey,
     _In_ DWORD dwFlags)
 {
-    return NTE_NOT_SUPPORTED;
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(dwFlags);
+    
+    if (!ValidateKeyHandle(hKey)) return NTE_INVALID_HANDLE;
+
+    PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
+    if (pKey->hBCryptKey)
+    {
+        BCryptDestroyKey(pKey->hBCryptKey);
+    }
+    SecureZeroMemory(pKey, sizeof(AUTHENTIK_KEY));
+    HeapFree(GetProcessHeap(), 0, pKey);
+
+    return ERROR_SUCCESS;
 }
 
 SECURITY_STATUS WINAPI AuthentikKSPFreeProvider(
     _In_ NCRYPT_PROV_HANDLE hProvider)
 {
-    SafeLog("[AuthentikKSP] FreeProvider\n");
+    SafeLog("[AuthentikKSP] FreeProvider");
+
     if (!ValidateProviderHandle(hProvider)) return NTE_INVALID_HANDLE;
 
-    __try
-    {
-        PAUTHENTIK_PROVIDER p = (PAUTHENTIK_PROVIDER)hProvider;
-        p->dwMagic = 0;
-        delete p;
-    }
-    __except(EXCEPTION_EXECUTE_HANDLER) { }
-    
+    PAUTHENTIK_PROVIDER pProvider = (PAUTHENTIK_PROVIDER)hProvider;
+    SecureZeroMemory(pProvider, sizeof(AUTHENTIK_PROVIDER));
+    HeapFree(GetProcessHeap(), 0, pProvider);
+
     return ERROR_SUCCESS;
 }
 
@@ -459,27 +540,36 @@ SECURITY_STATUS WINAPI AuthentikKSPFreeKey(
     _In_ NCRYPT_PROV_HANDLE hProvider,
     _In_ NCRYPT_KEY_HANDLE hKey)
 {
-    SafeLog("[AuthentikKSP] FreeKey\n");
+    UNREFERENCED_PARAMETER(hProvider);
+    
+    SafeLog("[AuthentikKSP] FreeKey");
+
     if (!ValidateKeyHandle(hKey)) return NTE_INVALID_HANDLE;
 
-    __try
+    PAUTHENTIK_KEY pKey = (PAUTHENTIK_KEY)hKey;
+    if (pKey->hBCryptKey)
     {
-        PAUTHENTIK_KEY k = (PAUTHENTIK_KEY)hKey;
-        if (k->hBCryptKey) BCryptDestroyKey(k->hBCryptKey);
-        SecureZeroMemory(k->privateKeyBlob.data(), k->privateKeyBlob.size());
-        k->dwMagic = 0;
-        delete k;
+        BCryptDestroyKey(pKey->hBCryptKey);
     }
-    __except(EXCEPTION_EXECUTE_HANDLER) { }
+    SecureZeroMemory(pKey, sizeof(AUTHENTIK_KEY));
+    HeapFree(GetProcessHeap(), 0, pKey);
 
     return ERROR_SUCCESS;
 }
 
-SECURITY_STATUS WINAPI AuthentikKSPFreeBuffer(_In_ PVOID pvInput)
+SECURITY_STATUS WINAPI AuthentikKSPFreeBuffer(
+    _Pre_notnull_ PVOID pvInput)
 {
-    if (pvInput) { __try { CoTaskMemFree(pvInput); } __except(EXCEPTION_EXECUTE_HANDLER) { } }
+    if (pvInput)
+    {
+        HeapFree(GetProcessHeap(), 0, pvInput);
+    }
     return ERROR_SUCCESS;
 }
+
+// ============================================================================
+// NCrypt Key Operations
+// ============================================================================
 
 SECURITY_STATUS WINAPI AuthentikKSPEncrypt(
     _In_ NCRYPT_PROV_HANDLE hProvider,
@@ -492,6 +582,15 @@ SECURITY_STATUS WINAPI AuthentikKSPEncrypt(
     _Out_ DWORD* pcbResult,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hKey);
+    UNREFERENCED_PARAMETER(pbInput);
+    UNREFERENCED_PARAMETER(cbInput);
+    UNREFERENCED_PARAMETER(pPaddingInfo);
+    UNREFERENCED_PARAMETER(pbOutput);
+    UNREFERENCED_PARAMETER(cbOutput);
+    UNREFERENCED_PARAMETER(pcbResult);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -506,6 +605,15 @@ SECURITY_STATUS WINAPI AuthentikKSPDecrypt(
     _Out_ DWORD* pcbResult,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hKey);
+    UNREFERENCED_PARAMETER(pbInput);
+    UNREFERENCED_PARAMETER(cbInput);
+    UNREFERENCED_PARAMETER(pPaddingInfo);
+    UNREFERENCED_PARAMETER(pbOutput);
+    UNREFERENCED_PARAMETER(cbOutput);
+    UNREFERENCED_PARAMETER(pcbResult);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -514,6 +622,9 @@ SECURITY_STATUS WINAPI AuthentikKSPIsAlgSupported(
     _In_ LPCWSTR pszAlgId,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(dwFlags);
+    
     if (pszAlgId && wcscmp(pszAlgId, BCRYPT_RSA_ALGORITHM) == 0)
         return ERROR_SUCCESS;
     return NTE_NOT_SUPPORTED;
@@ -526,6 +637,11 @@ SECURITY_STATUS WINAPI AuthentikKSPEnumAlgorithms(
     _Outptr_result_buffer_(*pdwAlgCount) NCryptAlgorithmName** ppAlgList,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(dwAlgOperations);
+    UNREFERENCED_PARAMETER(pdwAlgCount);
+    UNREFERENCED_PARAMETER(ppAlgList);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -536,6 +652,11 @@ SECURITY_STATUS WINAPI AuthentikKSPEnumKeys(
     _Inout_ PVOID* ppEnumState,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(pszScope);
+    UNREFERENCED_PARAMETER(ppKeyName);
+    UNREFERENCED_PARAMETER(ppEnumState);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -549,6 +670,14 @@ SECURITY_STATUS WINAPI AuthentikKSPImportKey(
     _In_ DWORD cbData,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hImportKey);
+    UNREFERENCED_PARAMETER(pszBlobType);
+    UNREFERENCED_PARAMETER(pParameterList);
+    UNREFERENCED_PARAMETER(phKey);
+    UNREFERENCED_PARAMETER(pbData);
+    UNREFERENCED_PARAMETER(cbData);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -563,6 +692,15 @@ SECURITY_STATUS WINAPI AuthentikKSPExportKey(
     _Out_ DWORD* pcbResult,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hKey);
+    UNREFERENCED_PARAMETER(hExportKey);
+    UNREFERENCED_PARAMETER(pszBlobType);
+    UNREFERENCED_PARAMETER(pParameterList);
+    UNREFERENCED_PARAMETER(pbOutput);
+    UNREFERENCED_PARAMETER(cbOutput);
+    UNREFERENCED_PARAMETER(pcbResult);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -577,6 +715,8 @@ SECURITY_STATUS WINAPI AuthentikKSPSignHash(
     _Out_ DWORD* pcbResult,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    
     KSP_LOG("SignHash: hashLen=%d, sigBufLen=%d, flags=0x%x", cbHashValue, cbSignature, dwFlags);
 
     if (!ValidateKeyHandle(hKey)) return NTE_INVALID_HANDLE;
@@ -630,6 +770,14 @@ SECURITY_STATUS WINAPI AuthentikKSPVerifySignature(
     _In_ DWORD cbSignature,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hKey);
+    UNREFERENCED_PARAMETER(pPaddingInfo);
+    UNREFERENCED_PARAMETER(pbHashValue);
+    UNREFERENCED_PARAMETER(cbHashValue);
+    UNREFERENCED_PARAMETER(pbSignature);
+    UNREFERENCED_PARAMETER(cbSignature);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -639,6 +787,10 @@ SECURITY_STATUS WINAPI AuthentikKSPPromptUser(
     _In_ LPCWSTR pszOperation,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hKey);
+    UNREFERENCED_PARAMETER(pszOperation);
+    UNREFERENCED_PARAMETER(dwFlags);
     return ERROR_SUCCESS;
 }
 
@@ -647,6 +799,9 @@ SECURITY_STATUS WINAPI AuthentikKSPNotifyChangeKey(
     _Inout_ HANDLE* phEvent,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(phEvent);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -657,6 +812,11 @@ SECURITY_STATUS WINAPI AuthentikKSPSecretAgreement(
     _Out_ NCRYPT_SECRET_HANDLE* phSecret,
     _In_ DWORD dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hPrivKey);
+    UNREFERENCED_PARAMETER(hPubKey);
+    UNREFERENCED_PARAMETER(phSecret);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -670,6 +830,14 @@ SECURITY_STATUS WINAPI AuthentikKSPDeriveKey(
     _Out_ DWORD* pcbResult,
     _In_ ULONG dwFlags)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hSharedSecret);
+    UNREFERENCED_PARAMETER(pwszKDF);
+    UNREFERENCED_PARAMETER(pParameterList);
+    UNREFERENCED_PARAMETER(pbDerivedKey);
+    UNREFERENCED_PARAMETER(cbDerivedKey);
+    UNREFERENCED_PARAMETER(pcbResult);
+    UNREFERENCED_PARAMETER(dwFlags);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -677,6 +845,8 @@ SECURITY_STATUS WINAPI AuthentikKSPFreeSecret(
     _In_ NCRYPT_PROV_HANDLE hProvider,
     _In_ NCRYPT_SECRET_HANDLE hSharedSecret)
 {
+    UNREFERENCED_PARAMETER(hProvider);
+    UNREFERENCED_PARAMETER(hSharedSecret);
     return NTE_NOT_SUPPORTED;
 }
 
@@ -719,7 +889,7 @@ HRESULT WINAPI AuthentikKSP_StoreKey(
         pEntry->dwFlags = 0;
         pEntry->dwKeySpec = dwKeySpec;
         GetSystemTimeAsFileTime(&pEntry->ftCreated);
-        
+
         ULARGE_INTEGER expiry;
         expiry.LowPart = pEntry->ftCreated.dwLowDateTime;
         expiry.HighPart = pEntry->ftCreated.dwHighDateTime;
@@ -750,7 +920,7 @@ HRESULT WINAPI AuthentikKSP_StoreKey(
 }
 
 extern "C" __declspec(dllexport)
-LPCWSTR WINAPI AuthentikKSP_GetProviderName()
+LPCWSTR WINAPI AuthentikKSP_GetProviderName(void)
 {
     return AUTHENTIK_KSP_NAME;
 }
