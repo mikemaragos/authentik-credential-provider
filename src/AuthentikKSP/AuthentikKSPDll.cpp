@@ -10,6 +10,9 @@
 #ifndef STATUS_INVALID_PARAMETER
 #define STATUS_INVALID_PARAMETER        ((NTSTATUS)0xC000000DL)
 #endif
+#ifndef STATUS_BUFFER_TOO_SMALL
+#define STATUS_BUFFER_TOO_SMALL         ((NTSTATUS)0xC0000023L)
+#endif
 
 // ============================================================================
 // NCrypt Key Storage Provider Function Table Definition
