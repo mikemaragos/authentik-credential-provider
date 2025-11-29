@@ -5,7 +5,8 @@
 #include "Logger.h"
 #include "CertificateHelper.h"
 #include "AuthentikAPI.h"
-#include "resource.h"
+// Icon resource ID
+#define IDI_AUTHENTIK_ICON 101
 #include <shlwapi.h>
 #include <new>
 
@@ -725,3 +726,4 @@ HRESULT CAuthentikCredential::_PackCertificateCredential(
 
     return S_OK;
 }
+
