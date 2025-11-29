@@ -1,168 +1,162 @@
-# Authentik Passwordless Credential Provider for Windows
+# Authentik Credential Provider for Windows
 
-A Windows Credential Provider that enables passwordless domain authentication using Authentik and PKINIT certificates.
-
-## Overview
-
-This credential provider allows Windows domain users to authenticate without passwords by:
-1. Entering their username
-2. Providing an OTP code (TOTP, push notification, etc.)
-3. Receiving a short-lived certificate from AD CS
-4. Authenticating via Kerberos PKINIT
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Windows   │────▶│  Authentik  │────▶│   AD CS     │────▶│   Domain    │
-│   Login     │     │  (OTP)      │     │  (Cert)     │     │ Controller  │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-```
+A Windows Credential Provider that integrates with Authentik for passwordless domain authentication using certificates and PKINIT.
 
 ## Features
 
-- **Passwordless Authentication** - No password required for domain login
-- **Multi-Factor** - OTP verification through Authentik
-- **Short-Lived Certificates** - 15-minute certificates minimize risk
-- **Standard Kerberos** - Uses native Windows PKINIT
-- **Enterprise Ready** - GPO deployment, logging, recovery options
+- **True Passwordless**: No AD password required at the Windows logon screen
+- **OTP Validation**: Authenticate with username + OTP only
+- **Certificate-Based**: Uses X.509 certificates for Kerberos PKINIT authentication
+- **Custom KSP**: Includes a Key Storage Provider for certificate-based Windows logon
+- **Enterprise Ready**: Integrates with Active Directory Certificate Services (AD CS)
 
-## Documentation
+## Architecture
 
-| Document | Description |
-|----------|-------------|
-| [Authentik Setup](docs/AUTHENTIK_SETUP.md) | Configure Authentik server and flows |
-| [Windows Deployment](docs/WINDOWS_DEPLOYMENT.md) | Deploy to Windows workstations |
-| [AD CS Setup](docs/ADCS_SETUP.md) | Configure certificate services |
-| [Architecture](docs/ARCHITECTURE_ADCS.md) | Technical architecture details |
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    AUTHENTICATION FLOW                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. User enters username + OTP at Windows logon                  │
+│  2. Credential Provider validates OTP with Authentik             │
+│  3. Authentik triggers certificate issuance from AD CS           │
+│  4. Certificate + private key returned to workstation            │
+│  5. Key stored in Authentik KSP shared memory                    │
+│  6. KERB_CERTIFICATE_LOGON sent to Windows LSA                   │
+│  7. Kerberos uses our KSP to sign PKINIT request                 │
+│  8. Domain Controller validates certificate, issues TGT          │
+│  9. User logged in - no password used!                           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Components
+
+| Component | Description | Location |
+|-----------|-------------|----------|
+| **AuthentikCredentialProvider.dll** | Windows Credential Provider | `src/AuthentikCredentialProvider/` |
+| **AuthentikKSP.dll** | Custom Key Storage Provider | `src/AuthentikKSP/` |
+| **CertIssuerService.ps1** | Certificate issuer service | `tools/cert-issuer/` |
+| **Test-PKINITAuth.ps1** | Diagnostic tool | `tools/diagnostics/` |
+
+## Prerequisites
+
+- Windows 10/11 or Windows Server 2016+
+- Active Directory domain
+- Active Directory Certificate Services (AD CS)
+- Authentik server with OTP configured
+- Visual Studio 2022 (for building)
 
 ## Quick Start
 
-### Prerequisites
+See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed installation instructions.
 
-- Authentik server (2023.x+)
-- Windows Server with AD CS
-- Domain-joined Windows 10/11 workstations
-- Users with TOTP configured in Authentik
+### Build
 
-### 1. Build the Credential Provider
+```cmd
+# Build KSP
+cd src\AuthentikKSP
+msbuild AuthentikKSP.vcxproj /p:Configuration=Release /p:Platform=x64
 
-```powershell
-# Open in Visual Studio 2022
-# Build → Build Solution (Release/x64)
+# Build Credential Provider
+cd src\AuthentikCredentialProvider
+msbuild AuthentikCredentialProvider.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
-### 2. Deploy to Workstation
+### Install
 
 ```powershell
-# Copy DLL
-copy x64\Release\AuthentikCredentialProvider.dll C:\Windows\System32\
+# Copy DLLs
+Copy-Item "AuthentikKSP.dll" "C:\Windows\System32\"
+Copy-Item "AuthentikCredentialProvider.dll" "C:\Windows\System32\"
 
-# Register
+# Register KSP (see docs/DEPLOYMENT.md for full script)
+# Register Credential Provider
 regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
 
-# Configure
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v ServerUrl /t REG_SZ /d "authentik.company.com" /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v FlowSlug /t REG_SZ /d "windows-passwordless" /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v Domain /t REG_SZ /d "COMPANY" /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v DomainFQDN /t REG_SZ /d "company.local" /f
+# Configure (see docs/DEPLOYMENT.md)
+# Reboot
 ```
 
-### 3. Configure Authentik
+## Configuration
 
-See [Authentik Setup Guide](docs/AUTHENTIK_SETUP.md) for complete instructions.
+Registry settings at `HKLM\SOFTWARE\AuthentikCredentialProvider`:
 
-### 4. Test
-
-1. Lock workstation (Win + L)
-2. Select "Authentik Passwordless Login"
-3. Enter username → Enter OTP
-4. Authenticate!
-
-## Project Structure
-
-```
-├── src/
-│   └── AuthentikCredentialProvider/
-│       ├── AuthentikAPI.cpp/h         # HTTP client for Authentik
-│       ├── AuthentikCredential.cpp/h  # Credential tile implementation
-│       ├── AuthentikCredentialProvider.cpp/h  # Main provider
-│       ├── CertificateHelper.cpp/h    # Certificate handling
-│       ├── FieldDescriptors.h         # UI field definitions
-│       ├── Dll.cpp                    # DLL entry point
-│       ├── guid.cpp/h                 # COM GUID
-│       └── Logger.h                   # Debug logging
-├── docs/
-│   ├── AUTHENTIK_SETUP.md            # Authentik configuration
-│   ├── WINDOWS_DEPLOYMENT.md         # Windows deployment
-│   ├── ADCS_SETUP.md                 # AD CS configuration
-│   └── ARCHITECTURE_ADCS.md          # Technical architecture
-└── README.md
-```
-
-## Registry Configuration
-
-| Setting | Type | Description |
-|---------|------|-------------|
+| Key | Type | Description |
+|-----|------|-------------|
 | ServerUrl | REG_SZ | Authentik server hostname |
-| ServerPort | REG_DWORD | HTTPS port (default: 443) |
+| ServerPort | REG_DWORD | Server port (default: 443) |
 | FlowSlug | REG_SZ | Authentik flow slug |
-| UseHttps | REG_DWORD | Use HTTPS (1=yes) |
+| UseHttps | REG_DWORD | Use HTTPS (1) or HTTP (0) |
+| CertIssuerUrl | REG_SZ | Certificate issuer service URL |
+| CertIssuerToken | REG_SZ | API token for cert issuer |
 | Domain | REG_SZ | NetBIOS domain name |
-| DomainFQDN | REG_SZ | Full domain name |
-| IgnoreCertErrors | REG_DWORD | Skip SSL validation (testing only) |
+| DomainFQDN | REG_SZ | FQDN of domain |
+
+## Documentation
+
+- [Deployment Guide](docs/DEPLOYMENT.md) - Complete installation instructions
+- [KSP README](src/AuthentikKSP/README.md) - Key Storage Provider details
+- [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
+
+## How It Works
+
+### The Custom KSP
+
+Windows Kerberos expects private keys to be available through a Key Storage Provider (KSP). 
+Normally, this is handled by a smart card or TPM. Our custom KSP:
+
+1. Stores certificates and private keys in secure shared memory
+2. Provides keys to Kerberos when it needs to sign PKINIT requests
+3. Cleans up keys after a configurable timeout
+
+### PKINIT Authentication
+
+Instead of sending a password hash to the Domain Controller, PKINIT:
+
+1. Signs an authentication request with the user's private key
+2. Includes the user's certificate in the request
+3. The DC verifies the certificate chain and signature
+4. Issues a TGT if valid (no password needed!)
+
+## Security Considerations
+
+- Keys are stored temporarily in memory (not on disk)
+- Keys auto-expire after configurable timeout
+- OTP provides the "something you have" factor
+- Certificate provides cryptographic proof of identity
+- No passwords stored or transmitted
+
+### Production Hardening
+
+- Enable SSL certificate validation
+- Code sign the DLLs
+- Encrypt sensitive registry values with DPAPI
+- Restrict registry permissions
 
 ## Troubleshooting
 
 ### Debug Logging
 
-Use [DebugView](https://docs.microsoft.com/en-us/sysinternals/downloads/debugview) to see real-time logs:
-1. Run DebugView as Administrator
-2. Enable Capture → Capture Global Win32
-3. Filter for `[AuthentikPwdlessCP]`
+Use DebugView to capture logs:
+- Filter: `[AuthentikCP]` for credential provider
+- Filter: `[AuthentikKSP]` for KSP
 
 ### Common Issues
 
 | Issue | Solution |
 |-------|----------|
-| Tile not showing | Re-register DLL, reboot |
-| HTTP 405 error | Check FlowSlug matches Authentik |
-| SSL errors | Set IgnoreCertErrors=1 for testing |
-| Login fails | Check DebugView for detailed error |
-
-See [Windows Deployment Guide](docs/WINDOWS_DEPLOYMENT.md) for more troubleshooting.
-
-## Security Considerations
-
-- **Testing**: `IgnoreCertErrors=1` is acceptable
-- **Production**: Use valid SSL certificates, set `IgnoreCertErrors=0`
-- **Certificates**: Keep validity short (15 minutes recommended)
-- **Recovery**: Always maintain alternate login method
-
-## Requirements
-
-### Build Requirements
-- Visual Studio 2022
-- Windows SDK 10.0.19041.0+
-- C++ Desktop Development workload
-
-### Runtime Requirements
-- Windows 10/11 or Server 2016+
-- Visual C++ Redistributable 2019+
-- Domain membership
-- Network access to Authentik
+| Credential provider not showing | Reboot, check registration |
+| "Key not found" errors | Verify KSP is registered |
+| Pre-Auth Type 2 in logs | KSP not being called, check CSP info |
+| Certificate trust errors | Verify CA in NTAuth store |
 
 ## License
 
-This project is provided for educational and testing purposes.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
+This project is provided as-is for educational and enterprise use.
 
 ## Acknowledgments
 
-- Microsoft Credential Provider samples
+- Microsoft Windows Credential Provider samples
 - Authentik project
-- PrivacyIDEA Credential Provider (inspiration)
+- PrivacyIDEA credential provider for inspiration
