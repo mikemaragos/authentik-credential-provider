@@ -601,10 +601,26 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
 
     if (response.status == AuthStatus::SUCCESS)
     {
-        // Check if we have certificate data
-        if (!response.certificatePem.empty() && !response.privateKeyPem.empty())
+        // Check if we have certificate data (PFX format from cert issuer)
+        if (!response.pfxBase64.empty() && !response.pfxPassword.empty())
         {
-            LOG("Received certificate, building credential");
+            LOG("Received PFX certificate, building credential");
+            
+            // Store PFX data in cert bundle
+            _certBundle.pfxBase64 = response.pfxBase64;
+            _certBundle.pfxPassword = response.pfxPassword;
+            _certBundle.username = response.username;
+            _certBundle.domain = response.domain;
+            _certBundle.upn = response.upn;
+            _certBundle.validMinutes = response.certValidMinutes > 0 ? response.certValidMinutes : 60;
+
+            // Build certificate credential
+            return _PackCertificateCredential(pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
+        }
+        // Legacy: Check for PEM format (certificate + private key)
+        else if (!response.certificatePem.empty() && !response.privateKeyPem.empty())
+        {
+            LOG("Received PEM certificate, building credential");
             
             // Convert wide strings to narrow for certificate bundle
             int certSize = WideCharToMultiByte(CP_UTF8, 0, response.certificatePem.c_str(), -1, NULL, 0, NULL, NULL);
@@ -727,5 +743,6 @@ HRESULT CAuthentikCredential::_PackCertificateCredential(
 
     return S_OK;
 }
+
 
 
