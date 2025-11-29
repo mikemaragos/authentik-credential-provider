@@ -206,112 +206,6 @@ static HRESULT SetRegistryKeyValue(
     return hr;
 }
 
-static HRESULT SetRegistryKeyValueDWORD(
-    HKEY hKeyRoot,
-    PCWSTR pszKeyPath,
-    PCWSTR pszValueName,
-    DWORD dwData)
-{
-    HRESULT hr;
-    HKEY hKey = NULL;
-
-    LONG lResult = RegCreateKeyExW(
-        hKeyRoot,
-        pszKeyPath,
-        0,
-        NULL,
-        REG_OPTION_NON_VOLATILE,
-        KEY_WRITE,
-        NULL,
-        &hKey,
-        NULL);
-
-    if (lResult == ERROR_SUCCESS)
-    {
-        lResult = RegSetValueExW(
-            hKey,
-            pszValueName,
-            0,
-            REG_DWORD,
-            (BYTE*)&dwData,
-            sizeof(DWORD));
-
-        RegCloseKey(hKey);
-        hr = HRESULT_FROM_WIN32(lResult);
-    }
-    else
-    {
-        hr = HRESULT_FROM_WIN32(lResult);
-    }
-
-    return hr;
-}
-
-// Helper function to set registry value ONLY if it doesn't exist
-static HRESULT SetRegistryKeyValueIfNotExists(
-    HKEY hKeyRoot,
-    PCWSTR pszKeyPath,
-    PCWSTR pszValueName,
-    PCWSTR pszData)
-{
-    HKEY hKey = NULL;
-    LONG lResult;
-    
-    // Try to open the key first
-    lResult = RegOpenKeyExW(hKeyRoot, pszKeyPath, 0, KEY_READ, &hKey);
-    
-    if (lResult == ERROR_SUCCESS)
-    {
-        // Key exists, check if value exists
-        DWORD dwType;
-        DWORD dwSize = 0;
-        lResult = RegQueryValueExW(hKey, pszValueName, NULL, &dwType, NULL, &dwSize);
-        RegCloseKey(hKey);
-        
-        if (lResult == ERROR_SUCCESS)
-        {
-            // Value already exists - don't overwrite
-            LOG("Registry value %S already exists, keeping existing value", pszValueName);
-            return S_OK;
-        }
-    }
-    
-    // Value doesn't exist, create it
-    return SetRegistryKeyValue(hKeyRoot, pszKeyPath, pszValueName, pszData);
-}
-
-static HRESULT SetRegistryKeyValueDWORDIfNotExists(
-    HKEY hKeyRoot,
-    PCWSTR pszKeyPath,
-    PCWSTR pszValueName,
-    DWORD dwData)
-{
-    HKEY hKey = NULL;
-    LONG lResult;
-    
-    // Try to open the key first
-    lResult = RegOpenKeyExW(hKeyRoot, pszKeyPath, 0, KEY_READ, &hKey);
-    
-    if (lResult == ERROR_SUCCESS)
-    {
-        // Key exists, check if value exists
-        DWORD dwType;
-        DWORD dwSize = 0;
-        lResult = RegQueryValueExW(hKey, pszValueName, NULL, &dwType, NULL, &dwSize);
-        RegCloseKey(hKey);
-        
-        if (lResult == ERROR_SUCCESS)
-        {
-            // Value already exists - don't overwrite
-            LOG("Registry value %S already exists, keeping existing value", pszValueName);
-            return S_OK;
-        }
-    }
-    
-    // Value doesn't exist, create it
-    return SetRegistryKeyValueDWORD(hKeyRoot, pszKeyPath, pszValueName, dwData);
-}
-
 // DllRegisterServer - Register the COM server and credential provider
 STDAPI DllRegisterServer()
 {
@@ -356,29 +250,13 @@ STDAPI DllRegisterServer()
         hr = SetRegistryKeyValue(HKEY_LOCAL_MACHINE, szSubkey, NULL, L"AuthentikPasswordlessCredentialProvider");
     }
 
-    // Create default configuration ONLY if values don't exist
-    // This prevents overwriting user's configuration on re-registration
-    if (SUCCEEDED(hr))
-    {
-        LOG("Creating default configuration (only for missing values)");
-        
-        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
-            L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerUrl", L"authentik.yourdomain.com");
-        SetRegistryKeyValueDWORDIfNotExists(HKEY_LOCAL_MACHINE, 
-            L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerPort", 443);
-        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
-            L"SOFTWARE\\AuthentikPasswordlessCP", L"FlowSlug", L"windows-passwordless");
-        SetRegistryKeyValueDWORDIfNotExists(HKEY_LOCAL_MACHINE, 
-            L"SOFTWARE\\AuthentikPasswordlessCP", L"UseHttps", 1);
-        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
-            L"SOFTWARE\\AuthentikPasswordlessCP", L"Domain", L"YOURDOMAIN");
-        SetRegistryKeyValueIfNotExists(HKEY_LOCAL_MACHINE, 
-            L"SOFTWARE\\AuthentikPasswordlessCP", L"DomainFQDN", L"yourdomain.com");
-        SetRegistryKeyValueDWORDIfNotExists(HKEY_LOCAL_MACHINE, 
-            L"SOFTWARE\\AuthentikPasswordlessCP", L"IgnoreCertErrors", 1);
-    }
+    // DO NOT create any default configuration values!
+    // The administrator MUST configure the registry manually before use.
+    // Required registry key: HKLM\SOFTWARE\AuthentikPasswordlessCP
+    // Required values: ServerUrl, ServerPort, FlowSlug, UseHttps, Domain, DomainFQDN, IgnoreCertErrors
 
     LOG("DllRegisterServer returning 0x%08x", hr);
+    LOG("NOTE: Administrator must configure HKLM\\SOFTWARE\\AuthentikPasswordlessCP before use!");
     return hr;
 }
 
