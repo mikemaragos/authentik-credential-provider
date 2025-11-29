@@ -1,5 +1,8 @@
 # Register-AuthentikKSP.ps1
 # Registers the Authentik Key Storage Provider with Windows
+#
+# Uses the correct CNG provider registration format with UM subkey
+# Compatible with Windows 10/11 and Windows Server 2016+
 
 param(
     [string]$DllPath = "$env:SystemRoot\System32\AuthentikKSP.dll",
@@ -15,13 +18,13 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 $ProviderName = "Authentik Key Storage Provider"
-$RegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\$ProviderName"
+$BasePath = "HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\$ProviderName"
 
 if ($Unregister) {
     Write-Host "Unregistering Authentik KSP..." -ForegroundColor Yellow
     
-    if (Test-Path $RegistryPath) {
-        Remove-Item -Path $RegistryPath -Recurse -Force
+    if (Test-Path $BasePath) {
+        Remove-Item -Path $BasePath -Recurse -Force
         Write-Host "Registry entries removed" -ForegroundColor Green
     }
     else {
@@ -41,29 +44,56 @@ if (-not (Test-Path $DllPath)) {
 Write-Host "Registering Authentik KSP..." -ForegroundColor Cyan
 Write-Host "DLL Path: $DllPath" -ForegroundColor Gray
 
-# Create registry structure
-if (-not (Test-Path $RegistryPath)) {
-    New-Item -Path $RegistryPath -Force | Out-Null
+# Remove any existing registration
+if (Test-Path $BasePath) {
+    Write-Host "Removing existing registration..." -ForegroundColor Yellow
+    Remove-Item -Path $BasePath -Recurse -Force
 }
 
-# Set provider properties
-Set-ItemProperty -Path $RegistryPath -Name "Image Path" -Value $DllPath -Type String
-Set-ItemProperty -Path $RegistryPath -Name "Type" -Value 1 -Type DWord  # Software provider
-Set-ItemProperty -Path $RegistryPath -Name "SupportedAlgorithms" -Value @("RSA") -Type MultiString
+# ============================================================================
+# Create the correct CNG Provider registry structure
+# This matches Microsoft's KSP registration format
+# ============================================================================
 
-# Create Functions subkey
-$FunctionsPath = "$RegistryPath\Functions"
-if (-not (Test-Path $FunctionsPath)) {
-    New-Item -Path $FunctionsPath -Force | Out-Null
-}
+# Create provider base key
+New-Item -Path $BasePath -Force | Out-Null
 
-# Register the key storage interface
-Set-ItemProperty -Path $FunctionsPath -Name "KeyStorageInterface" -Value "GetKeyStorageInterface" -Type String
+# Create UM (User Mode) subkey
+$UMPath = "$BasePath\UM"
+New-Item -Path $UMPath -Force | Out-Null
+
+# Set the Image value - just the DLL name, not full path
+# Windows looks in System32 automatically
+Set-ItemProperty -Path $UMPath -Name "Image" -Value "AuthentikKSP.dll" -Type String
+
+# Create interface version subkey
+# 00010001 = NCRYPT_KEY_STORAGE_INTERFACE_VERSION (1.1)
+$InterfacePath = "$UMPath\00010001"
+New-Item -Path $InterfacePath -Force | Out-Null
+
+# Set interface properties
+# (Default) = Interface type identifier
+Set-ItemProperty -Path $InterfacePath -Name "(default)" -Value "CRYPT_KEY_STORAGE_INTERFACE" -Type String
+
+# Flags = 0x00010000 (65536) = NCRYPT_REGISTER_NOTIFY_FLAG
+Set-ItemProperty -Path $InterfacePath -Name "Flags" -Value 65536 -Type DWord
+
+# Functions = Function group name
+Set-ItemProperty -Path $InterfacePath -Name "Functions" -Value "KEY_STORAGE" -Type String
 
 Write-Host "KSP registered successfully" -ForegroundColor Green
+Write-Host ""
+Write-Host "Registry structure created:" -ForegroundColor Cyan
+Write-Host "  $BasePath" -ForegroundColor Gray
+Write-Host "    \UM" -ForegroundColor Gray
+Write-Host "      Image = AuthentikKSP.dll" -ForegroundColor Gray
+Write-Host "      \00010001" -ForegroundColor Gray
+Write-Host "        (default) = CRYPT_KEY_STORAGE_INTERFACE" -ForegroundColor Gray
+Write-Host "        Flags = 65536" -ForegroundColor Gray
+Write-Host "        Functions = KEY_STORAGE" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Verify registration with:" -ForegroundColor Yellow
 Write-Host "  certutil -csplist" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Or test opening the provider:" -ForegroundColor Yellow
-Write-Host '  $null = [System.Security.Cryptography.CngProvider]::new("Authentik Key Storage Provider")' -ForegroundColor Cyan
+Write-Host "Or check registry:" -ForegroundColor Yellow
+Write-Host "  Get-ChildItem '$BasePath' -Recurse" -ForegroundColor Cyan
