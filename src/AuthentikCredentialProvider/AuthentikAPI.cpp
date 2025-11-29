@@ -10,13 +10,10 @@
 
 // Constructor
 AuthentikAPI::AuthentikAPI() :
-    _serverUrl(L"authentik.test.local"),
     _serverPort(443),
-    _flowSlug(L"default-authentication-flow"),
     _useHttps(true),
-    _ignoreCertErrors(true),
-    _domain(L"TEST"),
-    _domainFQDN(L"test.local")
+    _ignoreCertErrors(false),
+    _configurationValid(false)
 {
     LOG("AuthentikAPI::Constructor");
     _LoadConfiguration();
@@ -26,6 +23,18 @@ AuthentikAPI::AuthentikAPI() :
 AuthentikAPI::~AuthentikAPI()
 {
     LOG("AuthentikAPI::Destructor");
+}
+
+// Check if configuration is valid
+bool AuthentikAPI::IsConfigurationValid() const
+{
+    return _configurationValid;
+}
+
+// Get configuration error message
+std::wstring AuthentikAPI::GetConfigurationError() const
+{
+    return _configurationError;
 }
 
 // Reset session for new authentication
@@ -44,6 +53,16 @@ AuthentikResponse AuthentikAPI::SubmitUsername(const std::wstring& username)
     LOG("SubmitUsername: %S", username.c_str());
     
     AuthentikResponse response;
+    
+    // Check configuration first
+    if (!_configurationValid)
+    {
+        LOG("ERROR: Configuration not valid");
+        response.status = AuthStatus::ERROR_CONFIG;
+        response.message = _configurationError;
+        return response;
+    }
+    
     _currentUsername = username;
     
     // First, we need to GET the flow to start a session
@@ -109,6 +128,15 @@ AuthentikResponse AuthentikAPI::SubmitOTP(const std::wstring& otp)
     LOG("SubmitOTP");
     
     AuthentikResponse response;
+    
+    // Check configuration first
+    if (!_configurationValid)
+    {
+        LOG("ERROR: Configuration not valid");
+        response.status = AuthStatus::ERROR_CONFIG;
+        response.message = _configurationError;
+        return response;
+    }
     
     // Build request URL
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
@@ -180,6 +208,9 @@ std::wstring AuthentikAPI::_EscapeJson(const std::wstring& input)
 void AuthentikAPI::_LoadConfiguration()
 {
     LOG("Loading configuration from registry");
+    
+    _configurationValid = false;
+    _configurationError.clear();
 
     HKEY hKey;
     LONG result = RegOpenKeyExW(
@@ -189,80 +220,139 @@ void AuthentikAPI::_LoadConfiguration()
         KEY_READ,
         &hKey);
 
-    if (result == ERROR_SUCCESS)
+    if (result != ERROR_SUCCESS)
     {
-        WCHAR buffer[256];
-        DWORD bufferSize;
-        DWORD dwValue;
+        LOG("ERROR: Registry key not found: HKLM\\SOFTWARE\\AuthentikPasswordlessCP");
+        _configurationError = L"Configuration missing. Run: reg add HKLM\\SOFTWARE\\AuthentikPasswordlessCP";
+        return;
+    }
 
-        // Read server URL
-        bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"ServerUrl", NULL, NULL, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _serverUrl = buffer;
-            LOG("ServerUrl: %S", _serverUrl.c_str());
-        }
+    WCHAR buffer[256];
+    DWORD bufferSize;
+    DWORD dwValue;
+    bool hasError = false;
 
-        // Read server port
-        bufferSize = sizeof(DWORD);
-        result = RegQueryValueExW(hKey, L"ServerPort", NULL, NULL, (LPBYTE)&dwValue, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _serverPort = (INTERNET_PORT)dwValue;
-            LOG("ServerPort: %d", _serverPort);
-        }
-
-        // Read flow slug
-        bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"FlowSlug", NULL, NULL, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _flowSlug = buffer;
-            LOG("FlowSlug: %S", _flowSlug.c_str());
-        }
-
-        // Read HTTPS flag
-        bufferSize = sizeof(DWORD);
-        result = RegQueryValueExW(hKey, L"UseHttps", NULL, NULL, (LPBYTE)&dwValue, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _useHttps = (dwValue != 0);
-            LOG("UseHttps: %d", _useHttps);
-        }
-
-        // Read ignore cert errors flag
-        bufferSize = sizeof(DWORD);
-        result = RegQueryValueExW(hKey, L"IgnoreCertErrors", NULL, NULL, (LPBYTE)&dwValue, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _ignoreCertErrors = (dwValue != 0);
-            LOG("IgnoreCertErrors: %d", _ignoreCertErrors);
-        }
-
-        // Read domain
-        bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"Domain", NULL, NULL, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _domain = buffer;
-            LOG("Domain: %S", _domain.c_str());
-        }
-
-        // Read domain FQDN
-        bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"DomainFQDN", NULL, NULL, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _domainFQDN = buffer;
-            LOG("DomainFQDN: %S", _domainFQDN.c_str());
-        }
-
-        RegCloseKey(hKey);
+    // Read server URL (REQUIRED)
+    bufferSize = sizeof(buffer);
+    result = RegQueryValueExW(hKey, L"ServerUrl", NULL, NULL, (LPBYTE)buffer, &bufferSize);
+    if (result == ERROR_SUCCESS && buffer[0] != L'\0')
+    {
+        _serverUrl = buffer;
+        LOG("ServerUrl: %S", _serverUrl.c_str());
     }
     else
     {
-        LOG("Failed to open registry key: %d (using defaults)", result);
+        LOG("ERROR: ServerUrl not configured");
+        _configurationError = L"ServerUrl not configured in registry";
+        hasError = true;
+    }
+
+    // Read server port (optional, default 443)
+    bufferSize = sizeof(DWORD);
+    result = RegQueryValueExW(hKey, L"ServerPort", NULL, NULL, (LPBYTE)&dwValue, &bufferSize);
+    if (result == ERROR_SUCCESS)
+    {
+        _serverPort = (INTERNET_PORT)dwValue;
+        LOG("ServerPort: %d", _serverPort);
+    }
+    else
+    {
+        _serverPort = 443;
+        LOG("ServerPort: %d (default)", _serverPort);
+    }
+
+    // Read flow slug (REQUIRED)
+    bufferSize = sizeof(buffer);
+    result = RegQueryValueExW(hKey, L"FlowSlug", NULL, NULL, (LPBYTE)buffer, &bufferSize);
+    if (result == ERROR_SUCCESS && buffer[0] != L'\0')
+    {
+        _flowSlug = buffer;
+        LOG("FlowSlug: %S", _flowSlug.c_str());
+    }
+    else
+    {
+        LOG("ERROR: FlowSlug not configured");
+        if (!hasError)
+        {
+            _configurationError = L"FlowSlug not configured in registry";
+            hasError = true;
+        }
+    }
+
+    // Read HTTPS flag (optional, default true)
+    bufferSize = sizeof(DWORD);
+    result = RegQueryValueExW(hKey, L"UseHttps", NULL, NULL, (LPBYTE)&dwValue, &bufferSize);
+    if (result == ERROR_SUCCESS)
+    {
+        _useHttps = (dwValue != 0);
+        LOG("UseHttps: %d", _useHttps);
+    }
+    else
+    {
+        _useHttps = true;
+        LOG("UseHttps: %d (default)", _useHttps);
+    }
+
+    // Read ignore cert errors flag (optional, default false)
+    bufferSize = sizeof(DWORD);
+    result = RegQueryValueExW(hKey, L"IgnoreCertErrors", NULL, NULL, (LPBYTE)&dwValue, &bufferSize);
+    if (result == ERROR_SUCCESS)
+    {
+        _ignoreCertErrors = (dwValue != 0);
+        LOG("IgnoreCertErrors: %d", _ignoreCertErrors);
+    }
+    else
+    {
+        _ignoreCertErrors = false;
+        LOG("IgnoreCertErrors: %d (default)", _ignoreCertErrors);
+    }
+
+    // Read domain (REQUIRED)
+    bufferSize = sizeof(buffer);
+    result = RegQueryValueExW(hKey, L"Domain", NULL, NULL, (LPBYTE)buffer, &bufferSize);
+    if (result == ERROR_SUCCESS && buffer[0] != L'\0')
+    {
+        _domain = buffer;
+        LOG("Domain: %S", _domain.c_str());
+    }
+    else
+    {
+        LOG("ERROR: Domain not configured");
+        if (!hasError)
+        {
+            _configurationError = L"Domain not configured in registry";
+            hasError = true;
+        }
+    }
+
+    // Read domain FQDN (REQUIRED)
+    bufferSize = sizeof(buffer);
+    result = RegQueryValueExW(hKey, L"DomainFQDN", NULL, NULL, (LPBYTE)buffer, &bufferSize);
+    if (result == ERROR_SUCCESS && buffer[0] != L'\0')
+    {
+        _domainFQDN = buffer;
+        LOG("DomainFQDN: %S", _domainFQDN.c_str());
+    }
+    else
+    {
+        LOG("ERROR: DomainFQDN not configured");
+        if (!hasError)
+        {
+            _configurationError = L"DomainFQDN not configured in registry";
+            hasError = true;
+        }
+    }
+
+    RegCloseKey(hKey);
+    
+    if (!hasError)
+    {
+        _configurationValid = true;
+        LOG("Configuration loaded successfully");
+    }
+    else
+    {
+        LOG("ERROR: Configuration incomplete - %S", _configurationError.c_str());
     }
 }
 
