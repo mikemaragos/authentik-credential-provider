@@ -218,7 +218,25 @@ HRESULT CertificateHelper::ImportCertificateForPKINIT(CertificateBundle& bundle)
     // First parse the bundle if not already done
     if (!bundle.pCertContext)
     {
-        HRESULT hr = ParseCertificateBundle(bundle);
+        HRESULT hr;
+        
+        // Check if we have PFX data (preferred)
+        if (bundle.HasPfx())
+        {
+            LOG("Using PFX format for certificate import");
+            hr = ParsePfxBundle(bundle);
+        }
+        else if (bundle.HasPem())
+        {
+            LOG("Using PEM format for certificate import");
+            hr = ParseCertificateBundle(bundle);
+        }
+        else
+        {
+            LOG("No certificate data available");
+            return E_INVALIDARG;
+        }
+        
         if (FAILED(hr))
         {
             return hr;
@@ -229,6 +247,173 @@ HRESULT CertificateHelper::ImportCertificateForPKINIT(CertificateBundle& bundle)
     // For PKINIT, Windows will use the key through the certificate context
     
     LOG("Certificate ready for PKINIT");
+    return S_OK;
+}
+
+// Parse PFX (PKCS#12) bundle
+HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
+{
+    LOG("ParsePfxBundle");
+    
+    if (!bundle.HasPfx())
+    {
+        LOG("No PFX data in bundle");
+        return E_INVALIDARG;
+    }
+    
+    // Decode base64 PFX
+    std::vector<BYTE> pfxData;
+    HRESULT hr = Base64Decode(bundle.pfxBase64, pfxData);
+    if (FAILED(hr))
+    {
+        LOG("Failed to decode PFX base64: 0x%08x", hr);
+        return hr;
+    }
+    
+    LOG("Decoded PFX: %d bytes", (int)pfxData.size());
+    
+    // Create CRYPT_DATA_BLOB for PFX
+    CRYPT_DATA_BLOB pfxBlob;
+    pfxBlob.pbData = pfxData.data();
+    pfxBlob.cbData = (DWORD)pfxData.size();
+    
+    // Import the PFX into a temporary certificate store
+    // PKCS12_ALLOW_OVERWRITE_KEY - allow overwriting existing keys
+    // PKCS12_NO_PERSIST_KEY - don't persist the key
+    // CRYPT_EXPORTABLE - allow exporting the key (needed for PKINIT)
+    bundle.hMemStore = PFXImportCertStore(
+        &pfxBlob,
+        bundle.pfxPassword.c_str(),
+        CRYPT_EXPORTABLE | PKCS12_NO_PERSIST_KEY | PKCS12_ALLOW_OVERWRITE_KEY);
+    
+    if (!bundle.hMemStore)
+    {
+        DWORD err = GetLastError();
+        LOG("PFXImportCertStore failed: %d (0x%08x)", err, err);
+        
+        // Try without some flags for compatibility
+        bundle.hMemStore = PFXImportCertStore(
+            &pfxBlob,
+            bundle.pfxPassword.c_str(),
+            CRYPT_EXPORTABLE);
+        
+        if (!bundle.hMemStore)
+        {
+            err = GetLastError();
+            LOG("PFXImportCertStore retry failed: %d (0x%08x)", err, err);
+            return HRESULT_FROM_WIN32(err);
+        }
+    }
+    
+    LOG("PFX imported to memory store");
+    
+    // Find the certificate with a private key
+    bundle.pCertContext = CertFindCertificateInStore(
+        bundle.hMemStore,
+        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+        0,
+        CERT_FIND_HAS_PRIVATE_KEY,
+        NULL,
+        NULL);
+    
+    if (!bundle.pCertContext)
+    {
+        // Try to find any certificate
+        bundle.pCertContext = CertEnumCertificatesInStore(bundle.hMemStore, NULL);
+        if (!bundle.pCertContext)
+        {
+            LOG("No certificate found in PFX");
+            return E_FAIL;
+        }
+        LOG("Found certificate (without CERT_FIND_HAS_PRIVATE_KEY)");
+    }
+    else
+    {
+        LOG("Found certificate with private key");
+    }
+    
+    // Verify the certificate has an associated private key
+    DWORD keySpec = 0;
+    BOOL fCallerFreeProv = FALSE;
+    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE hCryptProv = 0;
+    
+    if (!CryptAcquireCertificatePrivateKey(
+        bundle.pCertContext,
+        CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
+        NULL,
+        &hCryptProv,
+        &keySpec,
+        &fCallerFreeProv))
+    {
+        LOG("WARNING: CryptAcquireCertificatePrivateKey failed: %d", GetLastError());
+        // Continue anyway - the key might still work through the PFX import
+    }
+    else
+    {
+        LOG("Private key acquired: keySpec=%d, isNCrypt=%d", 
+            keySpec, (keySpec == CERT_NCRYPT_KEY_SPEC) ? 1 : 0);
+        
+        if (keySpec == CERT_NCRYPT_KEY_SPEC)
+        {
+            bundle.hKey = hCryptProv;
+        }
+        else if (fCallerFreeProv)
+        {
+            // Legacy CAPI key - release it
+            CryptReleaseContext(hCryptProv, 0);
+        }
+    }
+    
+    // Log certificate info
+    WCHAR subjectName[256] = {0};
+    CertGetNameStringW(bundle.pCertContext, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL, subjectName, 256);
+    LOG("Certificate subject: %S", subjectName);
+    
+    LOG("PFX bundle parsed successfully");
+    return S_OK;
+}
+
+// Base64 decode
+HRESULT CertificateHelper::Base64Decode(
+    const std::wstring& base64,
+    std::vector<BYTE>& decoded)
+{
+    if (base64.empty())
+        return E_INVALIDARG;
+    
+    // First call to get required size
+    DWORD cbDecoded = 0;
+    if (!CryptStringToBinaryW(
+        base64.c_str(),
+        (DWORD)base64.length(),
+        CRYPT_STRING_BASE64,
+        NULL,
+        &cbDecoded,
+        NULL,
+        NULL))
+    {
+        LOG("CryptStringToBinaryW (size) failed: %d", GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    
+    // Allocate buffer
+    decoded.resize(cbDecoded);
+    
+    // Second call to actually decode
+    if (!CryptStringToBinaryW(
+        base64.c_str(),
+        (DWORD)base64.length(),
+        CRYPT_STRING_BASE64,
+        decoded.data(),
+        &cbDecoded,
+        NULL,
+        NULL))
+    {
+        LOG("CryptStringToBinaryW (decode) failed: %d", GetLastError());
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    
+    decoded.resize(cbDecoded);
     return S_OK;
 }
 
@@ -707,3 +892,4 @@ std::string CertificateHelper::ParseJsonStringNarrow(
     
     return result;
 }
+
