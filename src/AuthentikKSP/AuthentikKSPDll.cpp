@@ -2,7 +2,14 @@
 // DLL entry point and NCrypt function table export
 
 #include "AuthentikKSP.h"
-#include <ntstatus.h>
+
+// Define NTSTATUS codes we need (avoid including ntstatus.h which conflicts with windows.h)
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS                  ((NTSTATUS)0x00000000L)
+#endif
+#ifndef STATUS_INVALID_PARAMETER
+#define STATUS_INVALID_PARAMETER        ((NTSTATUS)0xC000000DL)
+#endif
 
 // ============================================================================
 // NCrypt Key Storage Provider Function Table Definition
