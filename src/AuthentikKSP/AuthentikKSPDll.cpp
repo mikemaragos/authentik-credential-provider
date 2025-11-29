@@ -186,3 +186,20 @@ NTSTATUS WINAPI GetKeyStorageInterface(
     *ppFunctionTable = &g_FunctionTable;
     return STATUS_SUCCESS;
 }
+
+// Alternative entry point name that some versions of Windows use
+extern "C" __declspec(dllexport)
+NTSTATUS WINAPI GetKeyStorageInterfaceEx(
+    _In_ LPCWSTR pszProviderName,
+    _In_ DWORD dwFlags,
+    _Out_ PVOID* ppFunctionTable,
+    _Out_ DWORD* pdwSize)
+{
+    if (ppFunctionTable == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    *ppFunctionTable = &g_FunctionTable;
+    if (pdwSize)
+        *pdwSize = sizeof(AUTHENTIK_KSP_FUNCTION_TABLE);
+    return STATUS_SUCCESS;
+}
