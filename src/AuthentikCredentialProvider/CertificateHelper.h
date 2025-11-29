@@ -1,6 +1,10 @@
 // CertificateHelper.h
 // Certificate parsing, import, and management for PKINIT authentication
-// Updated to use Authentik KSP for key storage
+//
+// This module handles:
+// - Parsing certificates from Authentik/cert issuer responses
+// - Storing keys in the KSP shared memory
+// - Building KERB_CERTIFICATE_LOGON structures for Windows authentication
 
 #pragma once
 
@@ -11,30 +15,34 @@
 #include <string>
 #include <vector>
 
+// Include shared memory structures (defines AUTHENTIK_KSP_NAME, structures, etc.)
+#include "../Shared/SharedMemory.h"
+
 // Link required libraries
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "NCrypt.lib")
 #pragma comment(lib, "BCrypt.lib")
 
-// KSP Provider Name - must match AuthentikKSP registration
-#define AUTHENTIK_KSP_NAME L"Authentik Key Storage Provider"
+// ============================================================================
+// Certificate Bundle Structure
+// ============================================================================
 
 // Certificate bundle received from Authentik/Cert Issuer
 struct CertificateBundle
 {
     // PEM format (legacy/alternative)
-    std::string certificate;        // PEM-encoded certificate
-    std::string privateKey;         // PEM-encoded private key
-    std::vector<std::string> caChain;  // PEM-encoded CA chain
+    std::string certificate;            // PEM-encoded certificate
+    std::string privateKey;             // PEM-encoded private key
+    std::vector<std::string> caChain;   // PEM-encoded CA chain
     
     // PFX format (preferred - from cert issuer)
-    std::wstring pfxBase64;         // Base64-encoded PFX/PKCS#12
-    std::wstring pfxPassword;       // Password for the PFX
+    std::wstring pfxBase64;             // Base64-encoded PFX/PKCS#12
+    std::wstring pfxPassword;           // Password for the PFX
     
     // User info
     std::wstring username;
     std::wstring domain;
-    std::wstring upn;               // User Principal Name
+    std::wstring upn;                   // User Principal Name
     DWORD validMinutes;
     
     // Parsed handles (populated by ParseCertificateBundle)
@@ -42,7 +50,12 @@ struct CertificateBundle
     NCRYPT_KEY_HANDLE hKey;
     HCERTSTORE hMemStore;
     
-    CertificateBundle() : pCertContext(NULL), hKey(0), hMemStore(NULL), validMinutes(5) {}
+    CertificateBundle() : 
+        pCertContext(NULL), 
+        hKey(0), 
+        hMemStore(NULL), 
+        validMinutes(AUTHENTIK_DEFAULT_KEY_VALIDITY) 
+    {}
     
     // Check if PFX data is available
     bool HasPfx() const { return !pfxBase64.empty() && !pfxPassword.empty(); }
@@ -88,42 +101,9 @@ struct CertificateBundle
     }
 };
 
-// Smart Card CSP Info structure for KERB_CERTIFICATE_LOGON
-// This mimics what a smart card would provide
-#pragma pack(push, 1)
-typedef struct _AUTHENTIK_SMARTCARD_CSP_INFO {
-    DWORD dwCspInfoLen;
-    DWORD MessageType;              // Always 1
-    union {
-        PVOID ContextInformation;
-        ULONG64 SpaceHolderForWow64;
-    };
-    DWORD flags;
-    DWORD KeySpec;                  // AT_KEYEXCHANGE (1) or AT_SIGNATURE (2)
-    ULONG nCardNameOffset;
-    ULONG nReaderNameOffset;
-    ULONG nContainerNameOffset;
-    ULONG nCSPNameOffset;
-    // Variable length buffer follows containing null-terminated strings:
-    // CardName, ReaderName, ContainerName, CSPName
-    WCHAR bBuffer[1];
-} AUTHENTIK_SMARTCARD_CSP_INFO, *PAUTHENTIK_SMARTCARD_CSP_INFO;
-#pragma pack(pop)
-
-// Use Windows SDK KERB_CERTIFICATE_LOGON if available, otherwise define our own
-// The SDK version is in NTSecAPI.h on Windows 10+
-#ifndef KERB_CERTIFICATE_LOGON_FLAG_CHECK_DUPLICATES
-#define KERB_CERTIFICATE_LOGON_FLAG_CHECK_DUPLICATES 0x1
-#endif
-
-#ifndef KERB_CERTIFICATE_LOGON_FLAG_USE_CERTIFICATE_INFO
-#define KERB_CERTIFICATE_LOGON_FLAG_USE_CERTIFICATE_INFO 0x2
-#endif
-
-// Certificate logon message type values
-// These are the KERB_LOGON_SUBMIT_TYPE enum values
-#define AUTHENTIK_KerbCertificateLogon 13
-#define AUTHENTIK_KerbCertificateUnlockLogon 15
+// ============================================================================
+// CertificateHelper Class
+// ============================================================================
 
 class CertificateHelper
 {
@@ -143,18 +123,16 @@ public:
     HRESULT ParsePfxBundle(CertificateBundle& bundle);
 
     // Import certificate and key into ephemeral store for PKINIT
-    HRESULT ImportCertificateForPKINIT(
-        CertificateBundle& bundle);
+    HRESULT ImportCertificateForPKINIT(CertificateBundle& bundle);
 
     // Build KERB_CERTIFICATE_LOGON structure for serialization
-    // This method stores the key in the KSP's shared memory
-    // and references the Authentik KSP in the CSP info
+    // This stores the key in the KSP's shared memory and references our KSP
     HRESULT BuildCertificateLogon(
         const CertificateBundle& bundle,
         BYTE** ppPackage,
         DWORD* pcbPackage);
 
-    // Build CSP Info structure
+    // Build CSP Info structure for KERB_CERTIFICATE_LOGON
     HRESULT BuildCspInfo(
         const std::wstring& containerName,
         const std::wstring& providerName,
@@ -198,11 +176,20 @@ private:
     HRESULT Base64Decode(
         const std::wstring& base64,
         std::vector<BYTE>& decoded);
+        
+    // Store key in KSP shared memory
+    HRESULT StoreKeyInKSP(
+        const std::wstring& containerName,
+        const std::wstring& userName,
+        const std::vector<BYTE>& privateKeyBlob,
+        const std::vector<BYTE>& certificateBlob,
+        DWORD dwKeySpec,
+        DWORD dwValidityMinutes);
 
     // Storage provider for ephemeral keys (used during parsing)
     NCRYPT_PROV_HANDLE _hProvider;
     
-    // Container name for this session
+    // Container name for this session (format: AuthentikPKINIT_{GUID})
     std::wstring _containerName;
 };
 
