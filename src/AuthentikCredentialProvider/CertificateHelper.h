@@ -15,8 +15,8 @@
 #include <string>
 #include <vector>
 
-// Include shared memory structures (defines AUTHENTIK_KSP_NAME, structures, etc.)
-#include "../Shared/SharedMemory.h"
+// Include shared memory structures (defines all AUTHENTIK_* constants and structures)
+#include "SharedMemory.h"
 
 // Link required libraries
 #pragma comment(lib, "Crypt32.lib")
@@ -176,15 +176,6 @@ private:
     HRESULT Base64Decode(
         const std::wstring& base64,
         std::vector<BYTE>& decoded);
-        
-    // Store key in KSP shared memory
-    HRESULT StoreKeyInKSP(
-        const std::wstring& containerName,
-        const std::wstring& userName,
-        const std::vector<BYTE>& privateKeyBlob,
-        const std::vector<BYTE>& certificateBlob,
-        DWORD dwKeySpec,
-        DWORD dwValidityMinutes);
 
     // Storage provider for ephemeral keys (used during parsing)
     NCRYPT_PROV_HANDLE _hProvider;
