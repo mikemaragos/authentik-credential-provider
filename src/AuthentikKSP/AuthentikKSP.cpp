@@ -924,3 +924,73 @@ LPCWSTR WINAPI AuthentikKSP_GetProviderName(void)
 {
     return AUTHENTIK_KSP_NAME;
 }
+
+extern "C" __declspec(dllexport)
+HRESULT WINAPI AuthentikKSP_RemoveKey(
+    _In_ LPCWSTR wszContainerName)
+{
+    KSP_LOG("RemoveKey: container=%S", wszContainerName ? wszContainerName : L"(null)");
+
+    if (!wszContainerName)
+        return E_INVALIDARG;
+
+    if (!TryInitializeKeyStore())
+        return E_FAIL;
+
+    __try
+    {
+        WaitForSingleObject(g_hMutex, 5000);
+
+        // Find and mark the key as expired (simple removal strategy)
+        PBYTE pCurrent = (PBYTE)g_pKeyStore + sizeof(AUTHENTIK_KEY_STORE_HEADER);
+        PBYTE pEnd = (PBYTE)g_pKeyStore + g_pKeyStore->cbTotalSize;
+
+        for (DWORD i = 0; i < g_pKeyStore->cKeys && pCurrent < pEnd; i++)
+        {
+            PAUTHENTIK_KEY_ENTRY pEntry = (PAUTHENTIK_KEY_ENTRY)pCurrent;
+            if (pEntry->dwMagic == AUTHENTIK_KEY_MAGIC)
+            {
+                if (_wcsicmp(pEntry->wszContainerName, wszContainerName) == 0)
+                {
+                    // Mark as expired by setting expiry to past
+                    pEntry->ftExpires.dwLowDateTime = 0;
+                    pEntry->ftExpires.dwHighDateTime = 0;
+                    ReleaseMutex(g_hMutex);
+                    KSP_LOG("Key removed (marked expired)");
+                    return S_OK;
+                }
+                DWORD entrySize = sizeof(AUTHENTIK_KEY_ENTRY) + pEntry->cbPrivateKey + pEntry->cbCertificate;
+                pCurrent += entrySize;
+            }
+            else break;
+        }
+
+        ReleaseMutex(g_hMutex);
+        KSP_LOG("Key not found for removal");
+        return S_FALSE;  // Not found, but not an error
+    }
+    __except(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ReleaseMutex(g_hMutex);
+        return E_FAIL;
+    }
+}
+
+extern "C" __declspec(dllexport)
+BOOL WINAPI AuthentikKSP_KeyExists(
+    _In_ LPCWSTR wszContainerName)
+{
+    KSP_LOG("KeyExists: container=%S", wszContainerName ? wszContainerName : L"(null)");
+
+    if (!wszContainerName)
+        return FALSE;
+
+    if (!TryInitializeKeyStore())
+        return FALSE;
+
+    PAUTHENTIK_KEY_ENTRY pEntry = FindKeyEntry(wszContainerName);
+    BOOL exists = (pEntry != NULL);
+    
+    KSP_LOG("KeyExists: %s", exists ? "YES" : "NO");
+    return exists;
+}
