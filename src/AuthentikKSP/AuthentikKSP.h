@@ -4,7 +4,8 @@
 // This KSP allows Windows to use certificates issued by Authentik for domain logon
 // without requiring a physical smart card or TPM.
 
-#pragma once
+#ifndef AUTHENTIK_KSP_H
+#define AUTHENTIK_KSP_H
 
 #include <windows.h>
 #include <ncrypt.h>
@@ -49,7 +50,16 @@ typedef struct _AUTHENTIK_PROVIDER {
 // KSP Function Table
 // ============================================================================
 
-// Required KSP functions (NCrypt interface)
+// Get the KSP function table
+extern "C" __declspec(dllexport) NTSTATUS WINAPI GetKeyStorageInterface(
+    _In_ LPCWSTR pszProviderName,
+    _Out_ NCRYPT_KEY_STORAGE_FUNCTION_TABLE** ppFunctionTable,
+    _In_ DWORD dwFlags);
+
+// ============================================================================
+// NCrypt Provider Functions
+// ============================================================================
+
 SECURITY_STATUS WINAPI AuthentikKSPOpenProvider(
     _Out_ NCRYPT_PROV_HANDLE* phProvider,
     _In_opt_ LPCWSTR pszProviderName,
@@ -121,6 +131,10 @@ SECURITY_STATUS WINAPI AuthentikKSPFreeKey(
 
 SECURITY_STATUS WINAPI AuthentikKSPFreeBuffer(
     _Pre_notnull_ PVOID pvInput);
+
+// ============================================================================
+// NCrypt Key Operations
+// ============================================================================
 
 SECURITY_STATUS WINAPI AuthentikKSPEncrypt(
     _In_ NCRYPT_PROV_HANDLE hProvider,
@@ -196,6 +210,10 @@ SECURITY_STATUS WINAPI AuthentikKSPDeriveKey(
 SECURITY_STATUS WINAPI AuthentikKSPFreeSecret(
     _In_ NCRYPT_PROV_HANDLE hProvider,
     _In_ NCRYPT_SECRET_HANDLE hSharedSecret);
+
+// ============================================================================
+// NCrypt Key Import/Export
+// ============================================================================
 
 SECURITY_STATUS WINAPI AuthentikKSPImportKey(
     _In_ NCRYPT_PROV_HANDLE hProvider,
