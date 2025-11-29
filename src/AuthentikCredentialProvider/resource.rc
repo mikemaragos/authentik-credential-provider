@@ -3,5 +3,5 @@
 
 #include "resource.h"
 
-// Tile icon - 48x48 recommended for credential provider tiles
-IDI_AUTHENTIK_ICON ICON "authentik.ico"
+// Tile icon (48x48)
+IDI_AUTHENTIK_ICON ICON "resources\\authentik.ico"
