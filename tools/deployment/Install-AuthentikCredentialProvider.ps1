@@ -84,7 +84,7 @@ $targetKsp = "$env:SystemRoot\System32\AuthentikKSP.dll"
 Copy-Item $kspDll $targetKsp -Force
 Write-Host "  Copied to: $targetKsp" -ForegroundColor Gray
 
-# Register KSP
+# Register KSP with correct CNG format (UM subkey structure)
 $ProviderName = "Authentik Key Storage Provider"
 $KspRegPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\$ProviderName"
 
@@ -92,15 +92,22 @@ if (Test-Path $KspRegPath) {
     Remove-Item $KspRegPath -Recurse -Force
 }
 
+# Create provider base key
 New-Item -Path $KspRegPath -Force | Out-Null
-Set-ItemProperty -Path $KspRegPath -Name "Image Path" -Value $targetKsp -Type String
-Set-ItemProperty -Path $KspRegPath -Name "Type" -Value 1 -Type DWord
 
-$FunctionsPath = "$KspRegPath\Functions"
-New-Item -Path $FunctionsPath -Force | Out-Null
-Set-ItemProperty -Path $FunctionsPath -Name "KeyStorageInterface" -Value "GetKeyStorageInterface" -Type String
+# Create UM (User Mode) subkey
+$UMPath = "$KspRegPath\UM"
+New-Item -Path $UMPath -Force | Out-Null
+Set-ItemProperty -Path $UMPath -Name "Image" -Value "AuthentikKSP.dll" -Type String
 
-Write-Host "  KSP registered" -ForegroundColor Green
+# Create interface version subkey (00010001 = version 1.1)
+$InterfacePath = "$UMPath\00010001"
+New-Item -Path $InterfacePath -Force | Out-Null
+Set-ItemProperty -Path $InterfacePath -Name "(default)" -Value "CRYPT_KEY_STORAGE_INTERFACE" -Type String
+Set-ItemProperty -Path $InterfacePath -Name "Flags" -Value 65536 -Type DWord
+Set-ItemProperty -Path $InterfacePath -Name "Functions" -Value "KEY_STORAGE" -Type String
+
+Write-Host "  KSP registered (UM format)" -ForegroundColor Green
 
 # ============================================================================
 # Install Credential Provider
