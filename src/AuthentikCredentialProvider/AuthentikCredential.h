@@ -27,6 +27,9 @@ enum class AuthStep
 class CAuthentikCredential : public ICredentialProviderCredential
 {
 public:
+    CAuthentikCredential();
+    virtual ~CAuthentikCredential();
+    
     // IUnknown
     IFACEMETHODIMP_(ULONG) AddRef();
     IFACEMETHODIMP_(ULONG) Release();
@@ -53,12 +56,6 @@ public:
 
     // Initialize credential
     HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd, const FIELD_STATE_PAIR* rgfsp);
-
-    friend HRESULT CAuthentikCredential_CreateInstance(REFIID riid, void** ppv);
-
-protected:
-    CAuthentikCredential();
-    ~CAuthentikCredential();
 
 private:
     // Helper methods for authentication steps
