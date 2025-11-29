@@ -8,6 +8,7 @@
 #include <credentialprovider.h>
 #include <NTSecAPI.h>
 #include <shlwapi.h>
+#include <new>
 
 #pragma comment(lib, "Secur32.lib")
 #pragma comment(lib, "Shlwapi.lib")
@@ -193,7 +194,7 @@ HRESULT CAuthentikProvider::GetCredentialAt(
         if (_pCredential == NULL)
         {
             // Create the credential
-            _pCredential = new (std::nothrow) CAuthentikCredential();
+            _pCredential = new(std::nothrow) CAuthentikCredential();
             if (_pCredential != NULL)
             {
                 hr = _pCredential->Initialize(
@@ -302,7 +303,7 @@ HRESULT CAuthentikProvider_CreateInstance(REFIID riid, void** ppv)
     LOG("CAuthentikProvider_CreateInstance");
 
     HRESULT hr;
-    CAuthentikProvider* pProvider = new (std::nothrow) CAuthentikProvider();
+    CAuthentikProvider* pProvider = new(std::nothrow) CAuthentikProvider();
 
     if (pProvider)
     {
