@@ -1,21 +1,19 @@
 // AuthentikCredential.h
-// Header for individual credential tile - passwordless authentication
+// Header for individual credential tile
 
 #pragma once
 
-#include <windows.h>
 #include <credentialprovider.h>
+#include <windows.h>
+#include <strsafe.h>
 #include <shlguid.h>
-#include <shlwapi.h>
 #include <string>
 #include "FieldDescriptors.h"
 #include "CertificateHelper.h"
-#include "guid.h"
-
-#pragma comment(lib, "Shlwapi.lib")
 
 // Forward declarations
 class AuthentikAPI;
+struct CertificateBundle;
 
 // Authentication steps
 enum class AuthStep
@@ -27,9 +25,6 @@ enum class AuthStep
 class CAuthentikCredential : public ICredentialProviderCredential
 {
 public:
-    CAuthentikCredential();
-    virtual ~CAuthentikCredential();
-    
     // IUnknown
     IFACEMETHODIMP_(ULONG) AddRef();
     IFACEMETHODIMP_(ULONG) Release();
@@ -57,8 +52,17 @@ public:
     // Initialize credential
     HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd, const FIELD_STATE_PAIR* rgfsp);
 
+    friend HRESULT CAuthentikCredential_CreateInstance(REFIID riid, void** ppv);
+
+    // Constructor is public so provider can create instances
+    CAuthentikCredential();
+
+protected:
+    ~CAuthentikCredential();
+
 private:
-    // Helper methods for authentication steps
+    // Helper methods
+    void _LoadTileIcon();
     HRESULT _HandleUsernameStep(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
     HRESULT _HandleOTPStep(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
     HRESULT _PackCertificateCredential(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
@@ -78,4 +82,7 @@ private:
     
     // Certificate helper
     CertificateHelper* _pCertHelper;
+    
+    // Tile icon
+    HBITMAP _hTileIcon;
 };
