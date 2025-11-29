@@ -1,24 +1,25 @@
 // AuthentikCredentialProvider.cpp
-// Main credential provider implementation - Passwordless version
+// Main credential provider implementation for passwordless authentication
 
 #include "AuthentikCredentialProvider.h"
 #include "AuthentikCredential.h"
 #include "Logger.h"
 #include "guid.h"
 #include <credentialprovider.h>
-#include <ntsecapi.h>
+#include <NTSecAPI.h>
 #include <shlwapi.h>
 
 #pragma comment(lib, "Secur32.lib")
 #pragma comment(lib, "Shlwapi.lib")
 
+// Negotiate package name
+#define NEGOSSP_NAME_A   "Negotiate"
+
 // Constructor
 CAuthentikProvider::CAuthentikProvider() :
     _cRef(1),
-    _pkiulSetSerialization(nullptr),
-    _dwSetSerializationCred(CREDENTIAL_PROVIDER_NO_DEFAULT),
     _cpus(CPUS_INVALID),
-    _pCredential(nullptr),
+    _pCredential(NULL),
     _upAdviseContext(0),
     _ulAuthPackage(0)
 {
@@ -31,16 +32,10 @@ CAuthentikProvider::~CAuthentikProvider()
 {
     LOG("CAuthentikProvider::Destructor");
     
-    if (_pCredential != nullptr)
+    if (_pCredential != NULL)
     {
         _pCredential->Release();
-        _pCredential = nullptr;
-    }
-
-    if (_pkiulSetSerialization)
-    {
-        HeapFree(GetProcessHeap(), 0, _pkiulSetSerialization);
-        _pkiulSetSerialization = nullptr;
+        _pCredential = NULL;
     }
 
     DllRelease();
@@ -82,30 +77,29 @@ HRESULT CAuthentikProvider::SetUsageScenario(
 
     HRESULT hr = S_OK;
 
+    // Decide which scenarios to support
     switch (cpus)
     {
     case CPUS_LOGON:
     case CPUS_UNLOCK_WORKSTATION:
-        // Support logon and unlock scenarios
+        // Support these scenarios
         _cpus = cpus;
 
-        // Get authentication package - try Kerberos first for PKINIT
+        // Get authentication package (Kerberos for PKINIT)
         hr = _GetAuthenticationPackageId();
         if (FAILED(hr))
         {
-            LOG_E("Failed to get authentication package ID: 0x%08x", hr);
+            LOG("Failed to get authentication package ID: 0x%08x", hr);
         }
         break;
 
     case CPUS_CHANGE_PASSWORD:
-        // Not supported - passwordless doesn't have passwords to change
-        LOG("Change password not supported for passwordless");
+        // Not supported for passwordless
         hr = E_NOTIMPL;
         break;
 
     case CPUS_CREDUI:
-        // Not supported for now
-        LOG("CredUI not supported");
+        // Not supported
         hr = E_NOTIMPL;
         break;
 
@@ -121,9 +115,7 @@ HRESULT CAuthentikProvider::SetSerialization(
     const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs)
 {
     LOG("CAuthentikProvider::SetSerialization");
-
-    // We don't pre-populate credentials from serialization
-    // This is used for things like RDP saved credentials
+    UNREFERENCED_PARAMETER(pcpcs);
     return E_NOTIMPL;
 }
 
@@ -132,9 +124,11 @@ HRESULT CAuthentikProvider::Advise(
     UINT_PTR upAdviseContext)
 {
     LOG("CAuthentikProvider::Advise");
+    UNREFERENCED_PARAMETER(pcpe);
 
     if (_upAdviseContext != 0)
     {
+        // Already advised
         return E_INVALIDARG;
     }
 
@@ -179,9 +173,9 @@ HRESULT CAuthentikProvider::GetCredentialCount(
 {
     LOG("CAuthentikProvider::GetCredentialCount");
 
-    *pdwCount = 1;  // Single credential tile
-    *pdwDefault = 0;  // Make it default
-    *pbAutoLogonWithDefault = FALSE;  // Don't auto-logon
+    *pdwCount = 1; // We provide one credential
+    *pdwDefault = 0; // Make it the default
+    *pbAutoLogonWithDefault = FALSE; // Don't auto-logon
 
     return S_OK;
 }
@@ -194,25 +188,23 @@ HRESULT CAuthentikProvider::GetCredentialAt(
 
     HRESULT hr = E_INVALIDARG;
 
-    if (dwIndex == 0 && ppcpc != nullptr)
+    if (dwIndex == 0 && ppcpc != NULL)
     {
-        if (_pCredential == nullptr)
+        if (_pCredential == NULL)
         {
             // Create the credential
-            _pCredential = new(std::nothrow) CAuthentikCredential();
-            if (_pCredential != nullptr)
+            _pCredential = new (std::nothrow) CAuthentikCredential();
+            if (_pCredential != NULL)
             {
                 hr = _pCredential->Initialize(
                     _cpus,
                     s_rgFieldDescriptors,
-                    s_rgFieldStatePairsLogon,
-                    _ulAuthPackage);
+                    s_rgFieldStatePairs);
 
                 if (FAILED(hr))
                 {
-                    LOG_E("Failed to initialize credential: 0x%08x", hr);
                     _pCredential->Release();
-                    _pCredential = nullptr;
+                    _pCredential = NULL;
                 }
             }
             else
@@ -221,7 +213,7 @@ HRESULT CAuthentikProvider::GetCredentialAt(
             }
         }
 
-        if (_pCredential != nullptr)
+        if (_pCredential != NULL)
         {
             hr = _pCredential->QueryInterface(IID_PPV_ARGS(ppcpc));
         }
@@ -234,52 +226,25 @@ HRESULT CAuthentikProvider::GetCredentialAt(
 HRESULT CAuthentikProvider::SetUserArray(ICredentialProviderUserArray* users)
 {
     LOG("CAuthentikProvider::SetUserArray");
+    UNREFERENCED_PARAMETER(users);
     // We don't use the user array for passwordless
-    // Could potentially pre-populate username if user is selected
     return S_OK;
 }
 
-// Get authentication package ID
-// For PKINIT (certificate auth), we need Kerberos
+// Helper method to get authentication package ID
 HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
 {
-    LOG("_GetAuthenticationPackageId");
-
     HRESULT hr = E_FAIL;
-    HANDLE hLsa = nullptr;
+    HANDLE hLsa = NULL;
     ULONG ulAuthPackage = 0;
     LSA_STRING packageName;
 
     // Connect to LSA
     NTSTATUS status = LsaConnectUntrusted(&hLsa);
-    if (!NT_SUCCESS(status))
+    if (status >= 0)
     {
-        LOG_E("LsaConnectUntrusted failed: 0x%08x", status);
-        return HRESULT_FROM_NT(status);
-    }
-
-    // Try Kerberos package first (needed for PKINIT certificate auth)
-    packageName.Buffer = (PCHAR)MICROSOFT_KERBEROS_NAME_A;
-    packageName.Length = (USHORT)strlen(packageName.Buffer);
-    packageName.MaximumLength = packageName.Length;
-
-    status = LsaLookupAuthenticationPackage(
-        hLsa,
-        &packageName,
-        &ulAuthPackage);
-
-    if (NT_SUCCESS(status))
-    {
-        _ulAuthPackage = ulAuthPackage;
-        hr = S_OK;
-        LOG("Using Kerberos authentication package ID: %d", ulAuthPackage);
-    }
-    else
-    {
-        LOG_W("Kerberos package lookup failed: 0x%08x, trying Negotiate", status);
-
-        // Fall back to Negotiate
-        packageName.Buffer = (PCHAR)NEGOSSP_NAME_A;
+        // Get "Kerberos" package for PKINIT
+        packageName.Buffer = (PCHAR)"Kerberos";
         packageName.Length = (USHORT)strlen(packageName.Buffer);
         packageName.MaximumLength = packageName.Length;
 
@@ -288,20 +253,46 @@ HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
             &packageName,
             &ulAuthPackage);
 
-        if (NT_SUCCESS(status))
+        if (status >= 0)
         {
             _ulAuthPackage = ulAuthPackage;
             hr = S_OK;
-            LOG("Using Negotiate authentication package ID: %d", ulAuthPackage);
+            LOG("Kerberos authentication package ID: %d", ulAuthPackage);
         }
         else
         {
-            LOG_E("LsaLookupAuthenticationPackage failed: 0x%08x", status);
-            hr = HRESULT_FROM_NT(status);
+            LOG("LsaLookupAuthenticationPackage failed: 0x%08x", status);
+            
+            // Fallback to Negotiate
+            packageName.Buffer = (PCHAR)NEGOSSP_NAME_A;
+            packageName.Length = (USHORT)strlen(packageName.Buffer);
+            packageName.MaximumLength = packageName.Length;
+            
+            status = LsaLookupAuthenticationPackage(
+                hLsa,
+                &packageName,
+                &ulAuthPackage);
+            
+            if (status >= 0)
+            {
+                _ulAuthPackage = ulAuthPackage;
+                hr = S_OK;
+                LOG("Negotiate authentication package ID: %d", ulAuthPackage);
+            }
+            else
+            {
+                hr = HRESULT_FROM_NT(status);
+            }
         }
+
+        LsaDeregisterLogonProcess(hLsa);
+    }
+    else
+    {
+        LOG("LsaConnectUntrusted failed: 0x%08x", status);
+        hr = HRESULT_FROM_NT(status);
     }
 
-    LsaDeregisterLogonProcess(hLsa);
     return hr;
 }
 
@@ -311,7 +302,7 @@ HRESULT CAuthentikProvider_CreateInstance(REFIID riid, void** ppv)
     LOG("CAuthentikProvider_CreateInstance");
 
     HRESULT hr;
-    CAuthentikProvider* pProvider = new(std::nothrow) CAuthentikProvider();
+    CAuthentikProvider* pProvider = new (std::nothrow) CAuthentikProvider();
 
     if (pProvider)
     {
