@@ -5,15 +5,12 @@
 #include <unknwn.h>
 #include <credentialprovider.h>
 #include <strsafe.h>
-#include <shlwapi.h>
 #include "AuthentikCredentialProvider.h"
 #include "Logger.h"
 #include "guid.h"
 
-#pragma comment(lib, "Shlwapi.lib")
-
 // Global DLL instance handle
-HINSTANCE g_hinst = nullptr;
+HINSTANCE g_hinst = NULL;
 
 // DLL reference count
 long g_cDllRef = 0;
@@ -21,12 +18,14 @@ long g_cDllRef = 0;
 // DllMain
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
+    UNREFERENCED_PARAMETER(lpReserved);
+    
     switch (dwReason)
     {
     case DLL_PROCESS_ATTACH:
         g_hinst = hModule;
         DisableThreadLibraryCalls(hModule);
-        LOG("DLL_PROCESS_ATTACH - Authentik Passwordless Credential Provider");
+        LOG("DLL_PROCESS_ATTACH");
         break;
 
     case DLL_PROCESS_DETACH:
@@ -87,7 +86,7 @@ public:
         }
         else
         {
-            *ppv = nullptr;
+            *ppv = NULL;
             hr = CLASS_E_NOAGGREGATION;
         }
         return hr;
@@ -126,9 +125,9 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
     LOG("DllGetClassObject called");
 
     HRESULT hr;
-    if (rclsid == CLSID_AuthentikPasswordlessCP)
+    if (rclsid == CLSID_AuthentikCredentialProvider)
     {
-        CClassFactory* pClassFactory = new(std::nothrow) CClassFactory();
+        CClassFactory* pClassFactory = new (std::nothrow) CClassFactory();
         if (pClassFactory)
         {
             hr = pClassFactory->QueryInterface(riid, ppv);
@@ -141,7 +140,7 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
     }
     else
     {
-        *ppv = nullptr;
+        *ppv = NULL;
         hr = CLASS_E_CLASSNOTAVAILABLE;
     }
 
@@ -164,18 +163,19 @@ static HRESULT SetRegistryKeyValue(
     PCWSTR pszValueName,
     PCWSTR pszData)
 {
-    HKEY hKey = nullptr;
+    HRESULT hr;
+    HKEY hKey = NULL;
 
     LONG lResult = RegCreateKeyExW(
         hKeyRoot,
         pszKeyPath,
         0,
-        nullptr,
+        NULL,
         REG_OPTION_NON_VOLATILE,
         KEY_WRITE,
-        nullptr,
+        NULL,
         &hKey,
-        nullptr);
+        NULL);
 
     if (lResult == ERROR_SUCCESS)
     {
@@ -192,29 +192,35 @@ static HRESULT SetRegistryKeyValue(
         }
 
         RegCloseKey(hKey);
+        hr = HRESULT_FROM_WIN32(lResult);
+    }
+    else
+    {
+        hr = HRESULT_FROM_WIN32(lResult);
     }
 
-    return HRESULT_FROM_WIN32(lResult);
+    return hr;
 }
 
-static HRESULT SetRegistryKeyValueDword(
+static HRESULT SetRegistryKeyValueDWORD(
     HKEY hKeyRoot,
     PCWSTR pszKeyPath,
     PCWSTR pszValueName,
     DWORD dwData)
 {
-    HKEY hKey = nullptr;
+    HRESULT hr;
+    HKEY hKey = NULL;
 
     LONG lResult = RegCreateKeyExW(
         hKeyRoot,
         pszKeyPath,
         0,
-        nullptr,
+        NULL,
         REG_OPTION_NON_VOLATILE,
         KEY_WRITE,
-        nullptr,
+        NULL,
         &hKey,
-        nullptr);
+        NULL);
 
     if (lResult == ERROR_SUCCESS)
     {
@@ -227,9 +233,14 @@ static HRESULT SetRegistryKeyValueDword(
             sizeof(DWORD));
 
         RegCloseKey(hKey);
+        hr = HRESULT_FROM_WIN32(lResult);
+    }
+    else
+    {
+        hr = HRESULT_FROM_WIN32(lResult);
     }
 
-    return HRESULT_FROM_WIN32(lResult);
+    return hr;
 }
 
 // DllRegisterServer - Register the COM server and credential provider
@@ -244,68 +255,52 @@ STDAPI DllRegisterServer()
     if (GetModuleFileNameW(g_hinst, szModule, ARRAYSIZE(szModule)) == 0)
     {
         hr = HRESULT_FROM_WIN32(GetLastError());
-        LOG_E("GetModuleFileName failed: 0x%08x", hr);
         return hr;
     }
-
-    // Get CLSID string
-    WCHAR szCLSID[64];
-    StringFromGUID2(CLSID_AuthentikPasswordlessCP, szCLSID, ARRAYSIZE(szCLSID));
-
-    WCHAR szSubkey[MAX_PATH];
 
     // Register CLSID
+    WCHAR szCLSID[40];
+    StringFromGUID2(CLSID_AuthentikCredentialProvider, szCLSID, ARRAYSIZE(szCLSID));
+
+    WCHAR szSubkey[MAX_PATH];
     StringCchPrintfW(szSubkey, ARRAYSIZE(szSubkey), L"CLSID\\%s", szCLSID);
 
-    hr = SetRegistryKeyValue(HKEY_CLASSES_ROOT, szSubkey, nullptr, L"Authentik Passwordless Credential Provider");
-    if (FAILED(hr))
+    hr = SetRegistryKeyValue(HKEY_CLASSES_ROOT, szSubkey, NULL, L"AuthentikPasswordlessCredentialProvider");
+    if (SUCCEEDED(hr))
     {
-        LOG_E("Failed to register CLSID: 0x%08x", hr);
-        return hr;
-    }
-
-    StringCchPrintfW(szSubkey, ARRAYSIZE(szSubkey), L"CLSID\\%s\\InprocServer32", szCLSID);
-    hr = SetRegistryKeyValue(HKEY_CLASSES_ROOT, szSubkey, nullptr, szModule);
-    if (FAILED(hr))
-    {
-        LOG_E("Failed to register InprocServer32: 0x%08x", hr);
-        return hr;
-    }
-
-    hr = SetRegistryKeyValue(HKEY_CLASSES_ROOT, szSubkey, L"ThreadingModel", L"Apartment");
-    if (FAILED(hr))
-    {
-        LOG_E("Failed to set ThreadingModel: 0x%08x", hr);
-        return hr;
+        StringCchPrintfW(szSubkey, ARRAYSIZE(szSubkey), L"CLSID\\%s\\InprocServer32", szCLSID);
+        hr = SetRegistryKeyValue(HKEY_CLASSES_ROOT, szSubkey, NULL, szModule);
+        
+        if (SUCCEEDED(hr))
+        {
+            hr = SetRegistryKeyValue(HKEY_CLASSES_ROOT, szSubkey, L"ThreadingModel", L"Apartment");
+        }
     }
 
     // Register as credential provider
-    StringCchPrintfW(szSubkey, ARRAYSIZE(szSubkey),
-        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Providers\\%s",
-        szCLSID);
-
-    hr = SetRegistryKeyValue(HKEY_LOCAL_MACHINE, szSubkey, nullptr, L"Authentik Passwordless Credential Provider");
-    if (FAILED(hr))
+    if (SUCCEEDED(hr))
     {
-        LOG_E("Failed to register as credential provider: 0x%08x", hr);
-        return hr;
+        StringCchPrintfW(szSubkey, ARRAYSIZE(szSubkey),
+            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Providers\\%s",
+            szCLSID);
+        
+        hr = SetRegistryKeyValue(HKEY_LOCAL_MACHINE, szSubkey, NULL, L"AuthentikPasswordlessCredentialProvider");
     }
 
     // Create default configuration
-    hr = SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerUrl", L"authentik.test.local");
     if (SUCCEEDED(hr))
     {
-        SetRegistryKeyValueDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerPort", 443);
+        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerUrl", L"authentik.example.com");
+        SetRegistryKeyValueDWORD(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"ServerPort", 443);
         SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"FlowSlug", L"windows-passwordless");
-        SetRegistryKeyValueDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"UseHttps", 1);
-        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"Domain", L"TEST");
-        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"DomainFQDN", L"test.local");
-        SetRegistryKeyValueDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"CertValidMinutes", 5);
-        SetRegistryKeyValueDword(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"IgnoreCertErrors", 1);
+        SetRegistryKeyValueDWORD(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"UseHttps", 1);
+        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"Domain", L"YOURDOMAIN");
+        SetRegistryKeyValue(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"DomainFQDN", L"yourdomain.local");
+        SetRegistryKeyValueDWORD(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP", L"IgnoreCertErrors", 1);
     }
 
-    LOG("DllRegisterServer succeeded - CLSID: %S", szCLSID);
-    return S_OK;
+    LOG("DllRegisterServer returning 0x%08x", hr);
+    return hr;
 }
 
 // DllUnregisterServer - Unregister the COM server and credential provider
@@ -315,20 +310,19 @@ STDAPI DllUnregisterServer()
 
     HRESULT hr = S_OK;
 
-    WCHAR szCLSID[64];
-    StringFromGUID2(CLSID_AuthentikPasswordlessCP, szCLSID, ARRAYSIZE(szCLSID));
+    WCHAR szCLSID[40];
+    StringFromGUID2(CLSID_AuthentikCredentialProvider, szCLSID, ARRAYSIZE(szCLSID));
 
     // Unregister credential provider
     WCHAR szSubkey[MAX_PATH];
     StringCchPrintfW(szSubkey, ARRAYSIZE(szSubkey),
         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Authentication\\Credential Providers\\%s",
         szCLSID);
-
+    
     LONG lResult = RegDeleteTreeW(HKEY_LOCAL_MACHINE, szSubkey);
     if (lResult != ERROR_SUCCESS && lResult != ERROR_FILE_NOT_FOUND)
     {
         hr = HRESULT_FROM_WIN32(lResult);
-        LOG_W("Failed to unregister credential provider: 0x%08x", hr);
     }
 
     // Unregister CLSID
@@ -337,11 +331,7 @@ STDAPI DllUnregisterServer()
     if (lResult != ERROR_SUCCESS && lResult != ERROR_FILE_NOT_FOUND)
     {
         hr = HRESULT_FROM_WIN32(lResult);
-        LOG_W("Failed to unregister CLSID: 0x%08x", hr);
     }
-
-    // Optionally remove configuration
-    // RegDeleteTreeW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikPasswordlessCP");
 
     LOG("DllUnregisterServer returning 0x%08x", hr);
     return hr;
