@@ -1,0 +1,11 @@
+// resource.rc
+// Resource file for Authentik Credential Provider
+
+#include "resource.h"
+
+// Icon resource
+// To use: Add a .ico file to the project and reference it here
+// IDI_AUTHENTIK_ICON ICON "resources\\authentik.ico"
+
+// For now, we'll use the PNG directly in code
+// The icon can be added later by converting the PNG to ICO format
