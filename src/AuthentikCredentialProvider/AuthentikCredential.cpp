@@ -6,6 +6,7 @@
 #include "CertificateHelper.h"
 #include "AuthentikAPI.h"
 #include <shlwapi.h>
+#include <new>
 
 #pragma comment(lib, "Shlwapi.lib")
 
@@ -36,7 +37,7 @@ CAuthentikCredential::CAuthentikCredential() :
     ZeroMemory(&_rgFieldStatePairs, sizeof(_rgFieldStatePairs));
 
     // Initialize API client
-    _pAuthentikAPI = new (std::nothrow) AuthentikAPI();
+    _pAuthentikAPI = new(std::nothrow) AuthentikAPI();
     
     // Initialize certificate helper
     CertificateHelper_CreateInstance(&_pCertHelper);
@@ -107,6 +108,8 @@ HRESULT CAuthentikCredential::Initialize(
     const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd,
     const FIELD_STATE_PAIR* rgfsp)
 {
+    UNREFERENCED_PARAMETER(rgfsp);
+    
     LOG("CAuthentikCredential::Initialize cpus=%d", cpus);
 
     _cpus = cpus;
