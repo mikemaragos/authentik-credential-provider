@@ -114,21 +114,18 @@ HRESULT CAuthentikCredential::Initialize(
 
     _cpus = cpus;
 
-    // Copy field descriptors and initial state
+    // Copy field state pairs
     for (DWORD i = 0; i < FID_NUM_FIELDS; i++)
     {
         _rgFieldStatePairs[i] = s_rgFieldStatePairsUnlock[i];
-
-        // Copy field strings
-        if (rgcpfd[i].pszLabel)
-        {
-            SHStrDupW(rgcpfd[i].pszLabel, &_rgFieldStrings[i]);
-        }
     }
 
-    // Set default text
-    SHStrDupW(L"Authentik Passwordless", &_rgFieldStrings[FID_LARGE_TEXT]);
-    SHStrDupW(L"Sign in with OTP", &_rgFieldStrings[FID_SMALL_TEXT]);
+    // Initialize field strings - NULL means use the label as placeholder
+    // The actual user input will be stored here when SetStringValue is called
+    for (DWORD i = 0; i < FID_NUM_FIELDS; i++)
+    {
+        _rgFieldStrings[i] = NULL;
+    }
 
     return S_OK;
 }
@@ -178,6 +175,22 @@ HRESULT CAuthentikCredential::SetDeselected()
     // Reset to initial state
     _currentStep = AuthStep::STEP_USERNAME;
     
+    // Clear field values
+    for (int i = 0; i < FID_NUM_FIELDS; i++)
+    {
+        if (_rgFieldStrings[i])
+        {
+            CoTaskMemFree(_rgFieldStrings[i]);
+            _rgFieldStrings[i] = NULL;
+        }
+    }
+    
+    // Reset field states
+    for (DWORD i = 0; i < FID_NUM_FIELDS; i++)
+    {
+        _rgFieldStatePairs[i] = s_rgFieldStatePairsUnlock[i];
+    }
+    
     // Reset API session
     if (_pAuthentikAPI)
     {
@@ -210,14 +223,15 @@ HRESULT CAuthentikCredential::GetStringValue(DWORD dwFieldID, LPWSTR* ppwsz)
 
     if (dwFieldID < ARRAYSIZE(_rgFieldStrings) && ppwsz)
     {
+        // Return the current value (may be NULL for empty/placeholder state)
         if (_rgFieldStrings[dwFieldID])
         {
             hr = SHStrDupW(_rgFieldStrings[dwFieldID], ppwsz);
         }
         else
         {
-            *ppwsz = NULL;
-            hr = S_OK;
+            // Return empty string - Windows will show the placeholder from pszLabel
+            hr = SHStrDupW(L"", ppwsz);
         }
     }
 
@@ -286,11 +300,20 @@ HRESULT CAuthentikCredential::SetStringValue(DWORD dwFieldID, LPCWSTR pwz)
         if (_rgFieldStrings[dwFieldID])
         {
             CoTaskMemFree(_rgFieldStrings[dwFieldID]);
+            _rgFieldStrings[dwFieldID] = NULL;
         }
 
-        hr = SHStrDupW(pwz ? pwz : L"", &_rgFieldStrings[dwFieldID]);
+        if (pwz && pwz[0] != L'\0')
+        {
+            hr = SHStrDupW(pwz, &_rgFieldStrings[dwFieldID]);
+        }
+        else
+        {
+            // Empty or null - leave as NULL (shows placeholder)
+            hr = S_OK;
+        }
         
-        LOG("SetStringValue: field=%d", dwFieldID);
+        LOG("SetStringValue: field=%d, hasValue=%d", dwFieldID, (_rgFieldStrings[dwFieldID] != NULL));
     }
 
     return hr;
@@ -385,59 +408,74 @@ HRESULT CAuthentikCredential::_HandleUsernameStep(
 
     if (username.empty())
     {
-        SHStrDupW(L"Please enter a username", ppwszOptionalStatusText);
+        LOG("Username is empty");
+        SHStrDupW(L"Please enter your username", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         return S_FALSE;
     }
+
+    LOG("Submitting username: %S", username.c_str());
 
     // Submit username to Authentik
     AuthentikResponse response = _pAuthentikAPI->SubmitUsername(username);
 
-    if (response.status == AuthStatus::NEED_OTP)
+    LOG("Response status: %d, message: %S", (int)response.status, response.message.c_str());
+
+    if (response.status == AuthStatus::NEED_OTP || 
+        response.status == AuthStatus::SUCCESS)  // Some flows go straight to OTP
     {
-        // Transition to OTP step
+        LOG("Transitioning to OTP step");
+        
+        // Hide username field, show OTP field
         _rgFieldStatePairs[FID_USERNAME].cpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
-        _rgFieldStatePairs[FID_USERNAME].cpfis = CPFIS_NONE;
+        _rgFieldStatePairs[FID_USERNAME].cpfis = CPFIS_NONE;  // No longer focused
         _rgFieldStatePairs[FID_OTP].cpfs = CPFS_DISPLAY_IN_SELECTED_TILE;
         _rgFieldStatePairs[FID_OTP].cpfis = CPFIS_FOCUSED;
-
-        // Update text
-        if (_rgFieldStrings[FID_SMALL_TEXT])
-        {
-            CoTaskMemFree(_rgFieldStrings[FID_SMALL_TEXT]);
-        }
-        SHStrDupW(L"Enter your OTP code", &_rgFieldStrings[FID_SMALL_TEXT]);
 
         // Notify UI of field changes
         if (_pCredentialEvents)
         {
-            _pCredentialEvents->SetFieldState(this, FID_USERNAME, CPFS_DISPLAY_IN_SELECTED_TILE);
+            // Update username field - make it read-only looking
             _pCredentialEvents->SetFieldInteractiveState(this, FID_USERNAME, CPFIS_NONE);
+            
+            // Show OTP field
             _pCredentialEvents->SetFieldState(this, FID_OTP, CPFS_DISPLAY_IN_SELECTED_TILE);
             _pCredentialEvents->SetFieldInteractiveState(this, FID_OTP, CPFIS_FOCUSED);
-            _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Enter your OTP code");
+            
+            // Update status text
+            _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Enter your one-time code");
         }
 
         _currentStep = AuthStep::STEP_OTP;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+        LOG("Now waiting for OTP");
         return S_FALSE;
     }
-    else if (response.status == AuthStatus::FAILED || 
-             response.status == AuthStatus::ERROR_NETWORK ||
-             response.status == AuthStatus::ERROR_SERVER)
+    else if (response.status == AuthStatus::ERROR_NETWORK)
     {
+        LOG("Network error");
+        SHStrDupW(L"Cannot connect to authentication server", ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+        return S_FALSE;
+    }
+    else if (response.status == AuthStatus::ERROR_SERVER)
+    {
+        LOG("Server error");
         SHStrDupW(response.message.c_str(), ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-        return E_FAIL;
+        return S_FALSE;
     }
-
-    // Unexpected response
-    SHStrDupW(L"Unexpected response from server", ppwszOptionalStatusText);
-    *pcpsiOptionalStatusIcon = CPSI_ERROR;
-    *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-    return E_FAIL;
+    else
+    {
+        LOG("Authentication failed: %S", response.message.c_str());
+        SHStrDupW(response.message.c_str(), ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+        return S_FALSE;
+    }
 }
 
 HRESULT CAuthentikCredential::_HandleOTPStep(
@@ -453,20 +491,27 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
 
     if (otp.empty())
     {
-        SHStrDupW(L"Please enter your OTP code", ppwszOptionalStatusText);
+        LOG("OTP is empty");
+        SHStrDupW(L"Please enter your one-time code", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         return S_FALSE;
     }
 
+    LOG("Submitting OTP");
+
     // Submit OTP to Authentik
     AuthentikResponse response = _pAuthentikAPI->SubmitOTP(otp);
+
+    LOG("OTP response status: %d", (int)response.status);
 
     if (response.status == AuthStatus::SUCCESS)
     {
         // Check if we have certificate data
         if (!response.certificatePem.empty() && !response.privateKeyPem.empty())
         {
+            LOG("Received certificate, building credential");
+            
             // Convert wide strings to narrow for certificate bundle
             int certSize = WideCharToMultiByte(CP_UTF8, 0, response.certificatePem.c_str(), -1, NULL, 0, NULL, NULL);
             int keySize = WideCharToMultiByte(CP_UTF8, 0, response.privateKeyPem.c_str(), -1, NULL, 0, NULL, NULL);
@@ -492,22 +537,30 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
         }
         else
         {
-            // No certificate - this shouldn't happen in passwordless flow
-            LOG("SUCCESS but no certificate data!");
-            SHStrDupW(L"Authentication succeeded but no certificate received", ppwszOptionalStatusText);
-            *pcpsiOptionalStatusIcon = CPSI_ERROR;
+            // OTP validated but no certificate - for testing phase
+            LOG("OTP validated but no certificate (testing mode)");
+            SHStrDupW(L"OTP validated! (Certificate issuance not configured)", ppwszOptionalStatusText);
+            *pcpsiOptionalStatusIcon = CPSI_WARNING;
             *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-            return E_FAIL;
+            
+            // Reset for next attempt
+            _currentStep = AuthStep::STEP_USERNAME;
+            if (_pAuthentikAPI)
+            {
+                _pAuthentikAPI->ResetSession();
+            }
+            
+            return S_FALSE;
         }
     }
     else if (response.status == AuthStatus::FAILED)
     {
-        // OTP validation failed - let user retry
-        SHStrDupW(response.message.c_str(), ppwszOptionalStatusText);
+        LOG("OTP validation failed");
+        SHStrDupW(L"Invalid code. Please try again.", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         
-        // Clear OTP field
+        // Clear OTP field for retry
         if (_rgFieldStrings[FID_OTP])
         {
             CoTaskMemFree(_rgFieldStrings[FID_OTP]);
@@ -522,11 +575,11 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
     }
     else
     {
-        // Network or server error
+        LOG("OTP error: %S", response.message.c_str());
         SHStrDupW(response.message.c_str(), ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-        return E_FAIL;
+        return S_FALSE;
     }
 }
 
