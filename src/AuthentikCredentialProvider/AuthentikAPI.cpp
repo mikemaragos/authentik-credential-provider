@@ -265,19 +265,34 @@ AuthentikResponse AuthentikAPI::_RequestCertificate(
     // Parse certificate response
     // Expected fields: success, certificate_pem, pfx_base64, pfx_password, thumbprint
     
-    // Check for success - it's a boolean, not a string, so look for the pattern directly
-    // PowerShell ConvertTo-Json outputs "success": true (with space) or "success":true
-    // Also handle case variations
+    // Check for success - it's a boolean, not a string
+    // Handle various formatting: "success": true, "success":true, "success" : true
+    // Also check for presence of pfx_base64 as backup indicator of success
     bool isSuccess = false;
     
-    // Convert to lowercase for case-insensitive search
-    std::wstring lowerResponse = responseBody;
-    for (auto& c : lowerResponse) c = towlower(c);
+    // Remove all whitespace/newlines for easier searching
+    std::wstring compactResponse;
+    compactResponse.reserve(responseBody.length());
+    for (wchar_t c : responseBody)
+    {
+        if (c != L' ' && c != L'\t' && c != L'\r' && c != L'\n')
+        {
+            compactResponse += towlower(c);
+        }
+    }
     
-    if (lowerResponse.find(L"\"success\": true") != std::wstring::npos ||
-        lowerResponse.find(L"\"success\":true") != std::wstring::npos)
+    // Now search for "success":true (no spaces, lowercase)
+    if (compactResponse.find(L"\"success\":true") != std::wstring::npos)
     {
         isSuccess = true;
+        LOG("Certificate issuer success=true found in compact response");
+    }
+    // Backup: if we have pfx_base64 data, consider it a success
+    else if (compactResponse.find(L"\"pfx_base64\":\"") != std::wstring::npos &&
+             compactResponse.find(L"\"pfx_password\":\"") != std::wstring::npos)
+    {
+        isSuccess = true;
+        LOG("Certificate issuer: pfx_base64 and pfx_password present, assuming success");
     }
     
     LOG("Certificate issuer success check: %s", isSuccess ? "true" : "false");
