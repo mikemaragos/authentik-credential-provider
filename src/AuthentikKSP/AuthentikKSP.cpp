@@ -188,73 +188,49 @@ SECURITY_STATUS WINAPI KSPSecretAgreement(NCRYPT_PROV_HANDLE h, NCRYPT_KEY_HANDL
 SECURITY_STATUS WINAPI KSPDeriveKey(NCRYPT_PROV_HANDLE h, NCRYPT_SECRET_HANDLE sec, LPCWSTR kdf, NCryptBufferDesc *params, PBYTE key, DWORD cbKey, DWORD *pcb, ULONG f) { return NTE_NOT_SUPPORTED; }
 SECURITY_STATUS WINAPI KSPFreeSecret(NCRYPT_PROV_HANDLE h, NCRYPT_SECRET_HANDLE sec) { return NTE_NOT_SUPPORTED; }
 
-// Function table with correct layout
-typedef struct _KSP_FUNCTION_TABLE {
-    ULONG_PTR Version;  // Must be pointer-sized for alignment
-    void* OpenProvider;
-    void* OpenKey;
-    void* CreatePersistedKey;
-    void* GetProviderProperty;
-    void* GetKeyProperty;
-    void* SetProviderProperty;
-    void* SetKeyProperty;
-    void* FinalizeKey;
-    void* DeleteKey;
-    void* FreeProvider;
-    void* FreeKey;
-    void* FreeBuffer;
-    void* Encrypt;
-    void* Decrypt;
-    void* IsAlgSupported;
-    void* EnumAlgorithms;
-    void* EnumKeys;
-    void* ImportKey;
-    void* ExportKey;
-    void* SignHash;
-    void* VerifySignature;
-    void* PromptUser;
-    void* NotifyChangeKey;
-    void* SecretAgreement;
-    void* DeriveKey;
-    void* FreeSecret;
-} KSP_FUNCTION_TABLE;
-
-static KSP_FUNCTION_TABLE g_FunctionTable = {0};
+// Function table - try matching what Windows expects exactly
+// Use simple void* array and cast
+static void* g_FunctionTable[32] = {0};
 
 NTSTATUS WINAPI GetKeyStorageInterface(LPCWSTR pszProviderName, void **ppFunctionTable, DWORD dwFlags) {
     Log("GetKeyStorageInterface");
     if (!g_bInit) { InitializeCriticalSection(&g_cs); g_bInit = TRUE; }
     if (!ppFunctionTable) return STATUS_INVALID_PARAMETER;
     
-    g_FunctionTable.Version = sizeof(KSP_FUNCTION_TABLE);  // cbSize, not version
-    g_FunctionTable.OpenProvider = (void*)KSPOpenProvider;
-    g_FunctionTable.OpenKey = (void*)KSPOpenKey;
-    g_FunctionTable.CreatePersistedKey = (void*)KSPCreatePersistedKey;
-    g_FunctionTable.GetProviderProperty = (void*)KSPGetProviderProperty;
-    g_FunctionTable.GetKeyProperty = (void*)KSPGetKeyProperty;
-    g_FunctionTable.SetProviderProperty = (void*)KSPSetProviderProperty;
-    g_FunctionTable.SetKeyProperty = (void*)KSPSetKeyProperty;
-    g_FunctionTable.FinalizeKey = (void*)KSPFinalizeKey;
-    g_FunctionTable.DeleteKey = (void*)KSPDeleteKey;
-    g_FunctionTable.FreeProvider = (void*)KSPFreeProvider;
-    g_FunctionTable.FreeKey = (void*)KSPFreeKey;
-    g_FunctionTable.FreeBuffer = (void*)KSPFreeBuffer;
-    g_FunctionTable.Encrypt = (void*)KSPEncrypt;
-    g_FunctionTable.Decrypt = (void*)KSPDecrypt;
-    g_FunctionTable.IsAlgSupported = (void*)KSPIsAlgSupported;
-    g_FunctionTable.EnumAlgorithms = (void*)KSPEnumAlgorithms;
-    g_FunctionTable.EnumKeys = (void*)KSPEnumKeys;
-    g_FunctionTable.ImportKey = (void*)KSPImportKey;
-    g_FunctionTable.ExportKey = (void*)KSPExportKey;
-    g_FunctionTable.SignHash = (void*)KSPSignHash;
-    g_FunctionTable.VerifySignature = (void*)KSPVerifySignature;
-    g_FunctionTable.PromptUser = NULL;
-    g_FunctionTable.NotifyChangeKey = (void*)KSPNotifyChangeKey;
-    g_FunctionTable.SecretAgreement = (void*)KSPSecretAgreement;
-    g_FunctionTable.DeriveKey = (void*)KSPDeriveKey;
-    g_FunctionTable.FreeSecret = (void*)KSPFreeSecret;
+    // First DWORD is version 0x00010001 (same as Microsoft)
+    // On x64, write it as DWORD at offset 0
+    *(DWORD*)&g_FunctionTable[0] = 0x00010001;
     
-    *ppFunctionTable = &g_FunctionTable;
+    // Function pointers start at offset 8 (after DWORD + padding)
+    void** funcs = (void**)((BYTE*)g_FunctionTable + 8);
+    funcs[0] = (void*)KSPOpenProvider;
+    funcs[1] = (void*)KSPOpenKey;
+    funcs[2] = (void*)KSPCreatePersistedKey;
+    funcs[3] = (void*)KSPGetProviderProperty;
+    funcs[4] = (void*)KSPGetKeyProperty;
+    funcs[5] = (void*)KSPSetProviderProperty;
+    funcs[6] = (void*)KSPSetKeyProperty;
+    funcs[7] = (void*)KSPFinalizeKey;
+    funcs[8] = (void*)KSPDeleteKey;
+    funcs[9] = (void*)KSPFreeProvider;
+    funcs[10] = (void*)KSPFreeKey;
+    funcs[11] = (void*)KSPFreeBuffer;
+    funcs[12] = (void*)KSPEncrypt;
+    funcs[13] = (void*)KSPDecrypt;
+    funcs[14] = (void*)KSPIsAlgSupported;
+    funcs[15] = (void*)KSPEnumAlgorithms;
+    funcs[16] = (void*)KSPEnumKeys;
+    funcs[17] = (void*)KSPImportKey;
+    funcs[18] = (void*)KSPExportKey;
+    funcs[19] = (void*)KSPSignHash;
+    funcs[20] = (void*)KSPVerifySignature;
+    funcs[21] = NULL;  // PromptUser
+    funcs[22] = (void*)KSPNotifyChangeKey;
+    funcs[23] = (void*)KSPSecretAgreement;
+    funcs[24] = (void*)KSPDeriveKey;
+    funcs[25] = (void*)KSPFreeSecret;
+    
+    *ppFunctionTable = g_FunctionTable;
     return STATUS_SUCCESS;
 }
 
