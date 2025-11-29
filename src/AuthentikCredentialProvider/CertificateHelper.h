@@ -50,6 +50,10 @@ struct CertificateBundle
     NCRYPT_KEY_HANDLE hKey;
     HCERTSTORE hMemStore;
     
+    // Extracted private key blob (BCRYPT_RSAPRIVATE_BLOB format)
+    // This is populated by ParsePfxBundle and used by BuildCertificateLogon
+    std::vector<BYTE> privateKeyBlob;
+    
     CertificateBundle() : 
         pCertContext(NULL), 
         hKey(0), 
@@ -62,6 +66,9 @@ struct CertificateBundle
     
     // Check if PEM data is available
     bool HasPem() const { return !certificate.empty() && !privateKey.empty(); }
+    
+    // Check if we have a usable private key
+    bool HasPrivateKey() const { return hKey != 0 || !privateKeyBlob.empty(); }
     
     // Cleanup method
     void Cleanup()
@@ -97,6 +104,11 @@ struct CertificateBundle
         {
             SecureZeroMemory(&pfxBase64[0], pfxBase64.size() * sizeof(wchar_t));
             pfxBase64.clear();
+        }
+        if (!privateKeyBlob.empty())
+        {
+            SecureZeroMemory(privateKeyBlob.data(), privateKeyBlob.size());
+            privateKeyBlob.clear();
         }
     }
 };
