@@ -248,6 +248,13 @@ AuthentikResponse AuthentikAPI::_RequestCertificate(
     
     LOG("Certificate issuer response: status=%d, length=%d", statusCode, (int)responseBody.length());
     
+    // Log first 300 chars of response for debugging
+    if (responseBody.length() > 0)
+    {
+        std::wstring preview = responseBody.substr(0, min((size_t)300, responseBody.length()));
+        LOG("Response preview: %S", preview.c_str());
+    }
+    
     if (statusCode != 200)
     {
         LOG("Certificate issuer error: %d", statusCode);
@@ -260,10 +267,18 @@ AuthentikResponse AuthentikAPI::_RequestCertificate(
     
     // Check for success - it's a boolean, not a string, so look for the pattern directly
     // PowerShell ConvertTo-Json outputs "success": true (with space) or "success":true
-    bool isSuccess = (responseBody.find(L"\"success\": true") != std::wstring::npos) ||
-                     (responseBody.find(L"\"success\":true") != std::wstring::npos) ||
-                     (responseBody.find(L"\"success\": True") != std::wstring::npos) ||
-                     (responseBody.find(L"\"success\":True") != std::wstring::npos);
+    // Also handle case variations
+    bool isSuccess = false;
+    
+    // Convert to lowercase for case-insensitive search
+    std::wstring lowerResponse = responseBody;
+    for (auto& c : lowerResponse) c = towlower(c);
+    
+    if (lowerResponse.find(L"\"success\": true") != std::wstring::npos ||
+        lowerResponse.find(L"\"success\":true") != std::wstring::npos)
+    {
+        isSuccess = true;
+    }
     
     LOG("Certificate issuer success check: %s", isSuccess ? "true" : "false");
     
