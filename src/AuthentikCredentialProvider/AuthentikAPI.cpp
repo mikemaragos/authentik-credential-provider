@@ -258,9 +258,16 @@ AuthentikResponse AuthentikAPI::_RequestCertificate(
     // Parse certificate response
     // Expected fields: success, certificate_pem, pfx_base64, pfx_password, thumbprint
     
-    std::wstring successStr = _ParseJsonString(responseBody, L"success");
-    if (successStr != L"true" && responseBody.find(L"\"success\":true") == std::wstring::npos &&
-        responseBody.find(L"\"success\": true") == std::wstring::npos)
+    // Check for success - it's a boolean, not a string, so look for the pattern directly
+    // PowerShell ConvertTo-Json outputs "success": true (with space) or "success":true
+    bool isSuccess = (responseBody.find(L"\"success\": true") != std::wstring::npos) ||
+                     (responseBody.find(L"\"success\":true") != std::wstring::npos) ||
+                     (responseBody.find(L"\"success\": True") != std::wstring::npos) ||
+                     (responseBody.find(L"\"success\":True") != std::wstring::npos);
+    
+    LOG("Certificate issuer success check: %s", isSuccess ? "true" : "false");
+    
+    if (!isSuccess)
     {
         std::wstring error = _ParseJsonString(responseBody, L"error");
         LOG("Certificate issuer returned success=false: %S", error.c_str());
