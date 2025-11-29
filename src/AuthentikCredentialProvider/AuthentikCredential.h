@@ -1,28 +1,27 @@
 // AuthentikCredential.h
-// Header for individual credential tile - Passwordless version
+// Header for individual credential tile - passwordless authentication
 
 #pragma once
 
-#include <credentialprovider.h>
 #include <windows.h>
-#include <strsafe.h>
+#include <credentialprovider.h>
 #include <shlguid.h>
 #include <shlwapi.h>
 #include <string>
 #include "FieldDescriptors.h"
 #include "CertificateHelper.h"
+#include "guid.h"
+
+#pragma comment(lib, "Shlwapi.lib")
 
 // Forward declarations
 class AuthentikAPI;
-struct AuthentikResponse;
 
-// Authentication steps for passwordless flow
+// Authentication steps
 enum class AuthStep
 {
-    STEP_USERNAME,      // Enter username
-    STEP_OTP,           // Enter OTP code
-    STEP_PROCESSING,    // Processing certificate
-    STEP_COMPLETE       // Ready to submit credentials
+    STEP_USERNAME,
+    STEP_OTP
 };
 
 class CAuthentikCredential : public ICredentialProviderCredential
@@ -49,23 +48,11 @@ public:
     IFACEMETHODIMP SetCheckboxValue(DWORD dwFieldID, BOOL bChecked);
     IFACEMETHODIMP SetComboBoxSelectedValue(DWORD dwFieldID, DWORD dwSelectedItem);
     IFACEMETHODIMP CommandLinkClicked(DWORD dwFieldID);
-    IFACEMETHODIMP GetSerialization(
-        CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
-        CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
-        LPWSTR* ppwszOptionalStatusText,
-        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
-    IFACEMETHODIMP ReportResult(
-        NTSTATUS ntsStatus,
-        NTSTATUS ntsSubstatus,
-        LPWSTR* ppwszOptionalStatusText,
-        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
+    IFACEMETHODIMP GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
+    IFACEMETHODIMP ReportResult(NTSTATUS ntsStatus, NTSTATUS ntsSubstatus, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
 
     // Initialize credential
-    HRESULT Initialize(
-        CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
-        const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd,
-        const FIELD_STATE_PAIR* rgfsp,
-        ULONG ulAuthPackage);
+    HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd, const FIELD_STATE_PAIR* rgfsp);
 
     friend HRESULT CAuthentikCredential_CreateInstance(REFIID riid, void** ppv);
 
@@ -74,49 +61,24 @@ protected:
     ~CAuthentikCredential();
 
 private:
-    // Step handlers
-    HRESULT _HandleUsernameStep(
-        CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
-        CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
-        LPWSTR* ppwszOptionalStatusText,
-        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
-    
-    HRESULT _HandleOTPStep(
-        CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
-        CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
-        LPWSTR* ppwszOptionalStatusText,
-        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
-    
-    // Process certificate and pack credentials
-    HRESULT _ProcessCertificateAndPack(
-        const AuthentikResponse& response,
-        CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
-        CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
-        LPWSTR* ppwszOptionalStatusText,
-        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
-    
-    // UI update helpers
-    void _TransitionToOTPStep(const std::wstring& prompt);
-    void _ShowError(const std::wstring& message);
-    void _ResetToUsernameStep();
+    // Helper methods for authentication steps
+    HRESULT _HandleUsernameStep(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
+    HRESULT _HandleOTPStep(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
+    HRESULT _PackCertificateCredential(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
 
-    // Member variables
     LONG _cRef;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus;
     LPWSTR _rgFieldStrings[FID_NUM_FIELDS];
     FIELD_STATE_PAIR _rgFieldStatePairs[FID_NUM_FIELDS];
-    ULONG _ulAuthPackage;
     ICredentialProviderCredentialEvents* _pCredentialEvents;
     
     // Authentication state
     AuthStep _currentStep;
-    std::wstring _currentUsername;
-    
-    // API and certificate helpers
-    AuthentikAPI* _pAuthentikAPI;
-    CertificateHelper* _pCertHelper;
     CertificateBundle _certBundle;
+    
+    // API client
+    AuthentikAPI* _pAuthentikAPI;
+    
+    // Certificate helper
+    CertificateHelper* _pCertHelper;
 };
-
-// Factory function
-HRESULT CAuthentikCredential_CreateInstance(REFIID riid, void** ppv);
