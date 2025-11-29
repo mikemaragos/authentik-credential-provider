@@ -1,8 +1,0 @@
-; AuthentikKSP.def
-; Module definition file for Authentik Key Storage Provider
-
-LIBRARY "AuthentikKSP"
-
-EXPORTS
-    GetKeyStorageInterface
-    DllMain
