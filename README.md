@@ -1,260 +1,182 @@
-# Authentik Credential Provider for Windows
+# Authentik Windows Credential Provider
 
-A Windows Credential Provider that integrates with Authentik for OTP-based domain authentication.
+Windows Credential Providers for domain authentication with Authentik identity provider.
 
-## Overview
+## Projects
 
-This credential provider allows users to authenticate to Windows using:
-1. Username + Password + OTP (concatenated or two-step)
-2. Integration with Authentik authentication server
-3. Support for TOTP, SMS, Email, and other OTP methods
+This repository contains two credential provider implementations:
 
-## Files Included
+### 1. Password + OTP Credential Provider (Original)
+**Location:** `src/AuthentikCredentialProvider/`
 
-### Core Components
-- **AuthentikCredentialProvider.cpp/h** - Main credential provider implementation
-- **AuthentikCredential.cpp/h** - Individual credential tile logic
-- **CredentialPacking.cpp/h** - KERB_INTERACTIVE_LOGON serialization (FIXED)
-- **AuthentikAPI.cpp/h** - HTTP client for Authentik communication
-- **Dll.cpp** - DLL entry point and COM registration
-- **AuthentikCredentialProvider.def** - DLL export definitions
+Traditional authentication flow:
+- Username + Password + OTP
+- OTP validated by Authentik
+- Password used for Kerberos authentication
+- **Use case:** Add OTP to existing password-based authentication
 
-### Supporting Files
-- **FieldDescriptors.h** - UI field definitions
-- **guid.h** - GUID definitions
-- **Logger.h** - Debug logging
+### 2. Passwordless Credential Provider (New) ⭐
+**Location:** `src/AuthentikPasswordlessCP/`
 
-## Building the Project
+True passwordless authentication:
+- Username + OTP only (no password!)
+- Authentik validates identity and requests certificate from AD CS
+- Certificate used for Kerberos PKINIT authentication
+- **Use case:** Eliminate passwords entirely
 
-### Prerequisites
-- Visual Studio 2019 or 2022
-- Windows SDK 10.0.19041.0 or later
-- x64 platform target
+## Architecture Comparison
 
-### Build Steps
+| Feature | Password + OTP | Passwordless |
+|---------|---------------|--------------|
+| User enters password | ✅ Yes | ❌ No |
+| OTP required | ✅ Yes | ✅ Yes |
+| Authentication method | Kerberos (password) | PKINIT (certificate) |
+| AD CS required | ❌ No | ✅ Yes |
+| Credential type | `KERB_INTERACTIVE_LOGON` | `KERB_CERTIFICATE_LOGON` |
 
-1. **Create a new Visual Studio project:**
-   - File â†’ New â†’ Project
-   - Select "Dynamic-Link Library (DLL)"
-   - Name: AuthentikCredentialProvider
-   - Platform: x64
+## Passwordless Authentication Flow
 
-2. **Add all source files to the project**
-
-3. **Configure project properties:**
-
-   **General:**
-   - Configuration Type: Dynamic Library (.dll)
-   - Platform: x64
-   - Windows SDK Version: 10.0 (latest installed)
-
-   **C/C++:**
-   - Additional Include Directories: (project directory)
-   - Preprocessor Definitions: Add `WIN32_LEAN_AND_MEAN;UNICODE;_UNICODE`
-   - Precompiled Headers: Not Using Precompiled Headers
-
-   **Linker:**
-   - Module Definition File: AuthentikCredentialProvider.def
-   - Additional Dependencies: Add `Secur32.lib;Advapi32.lib;Shlwapi.lib;Winhttp.lib`
-   - SubSystem: Windows
-
-4. **Build the solution:**
-   - Select "Release" configuration
-   - Platform: x64
-   - Build â†’ Build Solution
-
-5. **Output:**
-   - `AuthentikCredentialProvider.dll` will be in `x64/Release/`
-
-## Installation
-
-### 1. Copy DLL to System Directory
-
-```cmd
-copy AuthentikCredentialProvider.dll C:\Windows\System32\
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   Windows    │     │   Authentik  │     │    AD CS     │     │   Domain     │
+│   Client     │     │    Server    │     │     (CA)     │     │  Controller  │
+└──────┬───────┘     └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
+       │                    │                    │                    │
+       │ 1. Username        │                    │                    │
+       │───────────────────►│                    │                    │
+       │                    │                    │                    │
+       │ 2. OTP Challenge   │                    │                    │
+       │◄───────────────────│                    │                    │
+       │                    │                    │                    │
+       │ 3. OTP Code        │                    │                    │
+       │───────────────────►│                    │                    │
+       │                    │                    │                    │
+       │                    │ 4. Request Cert    │                    │
+       │                    │───────────────────►│                    │
+       │                    │                    │                    │
+       │                    │ 5. Certificate     │                    │
+       │                    │◄───────────────────│                    │
+       │                    │                    │                    │
+       │ 6. Cert + Key      │                    │                    │
+       │◄───────────────────│                    │                    │
+       │                    │                    │                    │
+       │ 7. PKINIT (Certificate-based Kerberos)  │                    │
+       │─────────────────────────────────────────────────────────────►│
+       │                    │                    │                    │
+       │ 8. Kerberos TGT    │                    │                    │
+       │◄─────────────────────────────────────────────────────────────│
+       │                    │                    │                    │
+       ▼                    ▼                    ▼                    ▼
+   User Logged In!
 ```
 
-### 2. Register the DLL
+## Quick Start
 
-```cmd
-regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
+### Passwordless (Recommended)
+
+1. **Configure AD CS** - See [ADCS_SETUP.md](docs/PasswordlessCP_ADCS_SETUP.md)
+2. **Configure Authentik** - Add certificate issuance stage to your flow
+3. **Build & Install**:
+   ```powershell
+   # Build
+   msbuild src\AuthentikPasswordlessCP\AuthentikPasswordlessCP.vcxproj /p:Configuration=Release /p:Platform=x64
+   
+   # Install (Admin)
+   copy x64\Release\AuthentikPasswordlessCP.dll C:\Windows\System32\
+   regsvr32 C:\Windows\System32\AuthentikPasswordlessCP.dll
+   ```
+4. **Configure Registry**:
+   ```
+   HKLM\SOFTWARE\AuthentikPasswordlessCP
+   ├── ServerUrl = "authentik.example.com"
+   ├── Domain = "YOURDOMAIN"
+   └── ...
+   ```
+5. **Reboot**
+
+### Password + OTP (Original)
+
+See [original documentation](docs/README.md)
+
+## Prerequisites
+
+### Client
+- Windows 10/11 or Windows Server 2016+
+- Domain-joined machine
+- Visual Studio 2022 for building
+
+### Server (Passwordless)
+- Authentik server with LDAP integration
+- AD CS (Enterprise CA) on domain controller
+- Certificate template for Smart Card Logon
+
+## Documentation
+
+### Passwordless Credential Provider
+- [README](docs/PasswordlessCP_README.md) - Full documentation
+- [Quick Start](docs/PasswordlessCP_QUICKSTART.md) - 5-minute setup
+- [AD CS Setup](docs/PasswordlessCP_ADCS_SETUP.md) - Certificate Authority configuration
+- [Architecture](docs/PasswordlessCP_ARCHITECTURE_ADCS.md) - Detailed architecture with AD CS
+- [Knowledge Base](docs/PasswordlessCP_KNOWLEDGE_BASE.md) - Technical reference
+
+### Original Password + OTP Provider
+- [README](docs/README.md)
+- [Knowledge Base](KNOWLEDGE_BASE.md)
+
+## Repository Structure
+
 ```
-
-### 3. Configure Registry Settings
-
-Create registry keys for configuration:
-
-```reg
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\AuthentikCredentialProvider]
-"ServerUrl"="authentik.test.local"
-"ServerPort"=dword:000001bb
-"FlowSlug"="windows-otp-auth"
-"UseHttps"=dword:00000001
+authentik-credential-provider/
+├── src/
+│   ├── AuthentikCredentialProvider/     # Original: Password + OTP
+│   │   ├── AuthentikAPI.cpp/h
+│   │   ├── AuthentikCredential.cpp/h
+│   │   ├── AuthentikCredentialProvider.cpp/h
+│   │   ├── CredentialPacking.cpp/h      # KERB_INTERACTIVE_LOGON
+│   │   └── ...
+│   │
+│   └── AuthentikPasswordlessCP/         # New: Passwordless + Certificate
+│       ├── AuthentikAPI.cpp/h           # HTTP client with session management
+│       ├── AuthentikCredential.cpp/h    # Username → OTP flow
+│       ├── AuthentikCredentialProvider.cpp/h
+│       ├── CertificateHelper.cpp/h      # Certificate parsing, PKINIT packing
+│       └── ...
+│
+├── docs/
+│   ├── PasswordlessCP_*.md              # Passwordless documentation
+│   └── *.md                             # Original documentation
+│
+└── tools/
+    └── *.ps1                            # Deployment scripts
 ```
-
-Save as `config.reg` and double-click to import.
-
-## Configuration
-
-### Registry Settings
-
-Location: `HKEY_LOCAL_MACHINE\SOFTWARE\AuthentikCredentialProvider`
-
-| Key | Type | Description | Example |
-|-----|------|-------------|---------|
-| ServerUrl | REG_SZ | Authentik server hostname | `authentik.test.local` |
-| ServerPort | REG_DWORD | Server port (443 for HTTPS) | `443` |
-| FlowSlug | REG_SZ | Authentik flow slug | `windows-otp-auth` |
-| UseHttps | REG_DWORD | Use HTTPS (1) or HTTP (0) | `1` |
-
-### Authentik Flow Configuration
-
-Create a flow in Authentik with these stages:
-1. **Identification Stage** - Captures username
-2. **Password Stage** - Validates password (optional)
-3. **Authenticator Validation Stage** - Validates OTP
-
-## Usage
-
-### User Experience
-
-**Two-Step Mode (Recommended):**
-1. Enter username and password
-2. Press Enter
-3. Enter OTP code
-4. Press Enter
-5. Login completes
-
-**Concatenated Mode:**
-1. Enter username
-2. Enter password + OTP concatenated (e.g., `MyPassword123456`)
-3. Press Enter
-4. Login completes
-
-## Troubleshooting
-
-### Enable Debug Logging
-
-Debug builds automatically log to DebugView:
-1. Download DebugView from Sysinternals
-2. Run DebugView as Administrator
-3. Look for `[AuthentikCP]` messages
-
-### Common Issues
-
-**DLL won't register:**
-- Ensure you're running as Administrator
-- Check DLL is for correct architecture (x64)
-- Verify all dependencies are present
-
-**Credential provider doesn't appear:**
-- Check registry: `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers`
-- Reboot the machine
-- Check Event Viewer for errors
-
-**Authentication fails:**
-- Verify Authentik server is reachable
-- Check registry configuration
-- Review DebugView logs
-- Test Authentik flow manually
-
-**Certificate errors:**
-- For production, use valid SSL certificates
-- Remove `SECURITY_FLAG_IGNORE_*` flags in AuthentikAPI.cpp
-- Implement proper certificate validation
 
 ## Security Considerations
 
-### Current Implementation (Testing)
-- âš ï¸ SSL certificate validation is DISABLED
-- âš ï¸ Password is cached in memory briefly
-- âš ï¸ No certificate pinning
+### Production Checklist
+- [ ] Use valid SSL certificates (disable `IgnoreCertErrors`)
+- [ ] Use short-lived certificates (1 hour or less)
+- [ ] Limit AD CS template enrollment to service account
+- [ ] Enable audit logging on Authentik and AD CS
+- [ ] Code sign the DLL
+- [ ] Test in isolated environment before production
 
-### For Production Use
-1. **Enable SSL validation:**
-   - Remove certificate ignore flags in `AuthentikAPI.cpp`
-   - Use valid SSL certificates on Authentik server
+## Contributing
 
-2. **Implement certificate pinning:**
-   - Pin Authentik server certificate
-   - Prevent MITM attacks
-
-3. **Secure password handling:**
-   - Minimize password lifetime in memory
-   - Use SecureZeroMemory to clear sensitive data
-   - Consider using Windows Credential Manager
-
-4. **API authentication:**
-   - Store API tokens securely (not in registry plaintext)
-   - Use Windows DPAPI for encryption
-   - Rotate tokens regularly
-
-## Known Limitations
-
-1. **Password still required** - Windows domain auth needs password or certificate
-2. **No offline support** - Requires network connectivity to Authentik
-3. **Simple JSON parsing** - Uses string matching instead of proper JSON library
-4. **No certificate-based auth** - Future enhancement for true passwordless
-
-## Future Enhancements
-
-- [ ] Certificate-based authentication (PKINIT)
-- [ ] Offline OTP validation
-- [ ] Proper JSON parsing library
-- [ ] Enhanced error messages
-- [ ] Group Policy configuration support
-- [ ] Multi-domain support
-- [ ] Password synchronization service
-- [ ] Biometric integration
-
-## Architecture Notes
-
-### Key Fixes Applied
-
-1. **Credential Packing:**
-   - Fixed UNICODE_STRING initialization
-   - Proper CoTaskMemAlloc usage for COM compatibility
-   - Correct structure alignment
-
-2. **Authentication Flow:**
-   - Two-step authentication with transaction IDs
-   - Proper state management
-   - Secure password caching
-
-3. **API Integration:**
-   - WinHTTP for reliable HTTPS communication
-   - Basic JSON response parsing
-   - Error handling and logging
-
-## References
-
-- [Microsoft Credential Provider Documentation](https://docs.microsoft.com/en-us/windows/win32/secauthn/credential-providers-in-windows)
-- [Authentik Documentation](https://goauthentik.io/docs/)
-- [PrivacyIDEA Credential Provider](https://github.com/privacyidea/privacyidea-credential-provider)
+1. Fork the repository
+2. Create a feature branch
+3. Submit a pull request
 
 ## License
 
-This is sample code for educational and testing purposes.
+MIT License - See [LICENSE](LICENSE)
 
 ## Support
 
-For issues or questions:
-- Review the DebugView logs
+- Review debug logs (DebugView for `[AuthentikPwdlessCP]` messages)
 - Check Authentik server logs
-- Verify network connectivity
-- Test Authentik flow manually via web browser
-
-## Version History
-
-- **v1.0** - Initial release
-  - Two-step OTP authentication
-  - Authentik API integration
-  - Fixed credential packing
-  - Debug logging
+- Check Windows Event Viewer (Security, Kerberos-Key-Distribution-Center)
+- Check AD CS certificate issuance logs
 
 ---
 
-**IMPORTANT:** This credential provider is for testing and development. 
-For production use, implement all security recommendations above.
+**⚠️ Note:** Always test in a lab environment before deploying to production. Keep recovery access available (Safe Mode, local admin account).
