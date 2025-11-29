@@ -1,178 +1,88 @@
-# Quick Start Guide
+# Quick Start Guide - Authentik Passwordless Credential Provider
 
-## Building the Credential Provider
+## 5-Minute Setup (Development/Testing)
 
-### Option 1: Using Visual Studio (Recommended)
-
-1. **Open the project:**
-   - Double-click `AuthentikCredentialProvider.vcxproj`
-   - Or open Visual Studio â†’ File â†’ Open â†’ Project/Solution
-
-2. **Select configuration:**
-   - Configuration: Release
-   - Platform: x64
-
-3. **Build:**
-   - Build â†’ Build Solution (Ctrl+Shift+B)
-   - Output: `x64\Release\AuthentikCredentialProvider.dll`
-
-### Option 2: Using MSBuild (Command Line)
+### Step 1: Build
 
 ```cmd
-"C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" AuthentikCredentialProvider.vcxproj /p:Configuration=Release /p:Platform=x64
+:: Open VS Developer Command Prompt, navigate to project directory
+msbuild AuthentikPasswordlessCP.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
-## Installation Steps
-
-### 1. Copy DLL
+### Step 2: Install
 
 ```cmd
-# Run as Administrator
-copy x64\Release\AuthentikCredentialProvider.dll C:\Windows\System32\
+:: Run as Administrator
+copy x64\Release\AuthentikPasswordlessCP.dll C:\Windows\System32\
+regsvr32 C:\Windows\System32\AuthentikPasswordlessCP.dll
 ```
 
-### 2. Register DLL
+### Step 3: Configure
+
+Edit registry or run this (adjust values for your environment):
 
 ```cmd
-# Run as Administrator
-regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
+:: Run as Administrator
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v ServerUrl /t REG_SZ /d "authentik.test.local" /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v ServerPort /t REG_DWORD /d 443 /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v FlowSlug /t REG_SZ /d "windows-passwordless" /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v UseHttps /t REG_DWORD /d 1 /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v Domain /t REG_SZ /d "TEST" /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v DomainFQDN /t REG_SZ /d "test.local" /f
+reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v IgnoreCertErrors /t REG_DWORD /d 1 /f
 ```
 
-Expected output: "DllRegisterServer in AuthentikCredentialProvider.dll succeeded."
-
-### 3. Configure Settings
-
-Create `config.reg`:
-
-```reg
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\AuthentikCredentialProvider]
-"ServerUrl"="authentik.test.local"
-"ServerPort"=dword:000001bb
-"FlowSlug"="windows-otp-auth"
-"UseHttps"=dword:00000001
-```
-
-Double-click to import, or:
-
-```cmd
-reg import config.reg
-```
-
-### 4. Reboot
+### Step 4: Reboot
 
 ```cmd
 shutdown /r /t 0
 ```
 
-## Testing
+### Step 5: Test
 
-### 1. Enable Debug Logging
+1. Start **DebugView** (as Administrator) before testing
+2. Press **Win+L** to lock
+3. Look for "**Authentik Passwordless Login**" tile
+4. Enter username → click Sign In
+5. Enter OTP code → click Verify
+6. Watch DebugView for `[AuthentikPwdlessCP]` messages
 
-- Download [DebugView](https://docs.microsoft.com/en-us/sysinternals/downloads/debugview)
-- Run as Administrator
-- Look for `[AuthentikCP]` messages
+## Troubleshooting Quick Reference
 
-### 2. Lock Screen
+| Problem | Solution |
+|---------|----------|
+| Tile doesn't appear | Reboot. Check `regsvr32` succeeded |
+| "Failed to connect" | Check `ServerUrl` in registry. Try `ping authentik.test.local` |
+| OTP fails | Check Authentik flow is configured correctly |
+| "No certificate" | Authentik must return certificate in response |
+| Login fails after OTP | Check DC trusts CA. See README for NTAuth setup |
 
-- Press Win+L
-- Look for "Authentik OTP Login" tile
+## Log Messages to Look For
 
-### 3. Test Authentication
-
-**Two-Step Mode:**
-1. Username: `mike`
-2. Password: `YourPassword`
-3. Press Enter
-4. OTP: `123456`
-5. Press Enter
-
-## Troubleshooting
-
-### Credential Provider Not Showing
-
-**Check Registration:**
-```cmd
-reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers" /s
+```
+✓ DLL_PROCESS_ATTACH - Authentik Passwordless Credential Provider
+✓ CAuthentikProvider::SetUsageScenario - cpus=1
+✓ Using Kerberos authentication package ID: X
+✓ InitiateAuthentication: user=mike
+✓ OTP required, transitioning to OTP step
+✓ SubmitOTP
+✓ OTP validated, certificate received
+✓ Certificate credentials packed successfully
 ```
 
-Look for `{8B7C4F9E-2A3D-4E5F-9C1B-7D8E6F4A5B3C}`
-
-**Check File:**
-```cmd
-dir C:\Windows\System32\AuthentikCredentialProvider.dll
-```
-
-**Reboot:**
-Windows caches credential providers.
-
-### Build Errors
-
-**LNK2019: unresolved external symbol**
-- Ensure `Secur32.lib;Advapi32.lib;Shlwapi.lib;Winhttp.lib` are in Additional Dependencies
-- Check Platform is x64
-
-**Cannot open include file**
-- Verify Windows SDK is installed
-- Check project properties â†’ VC++ Directories
-
-### Authentication Fails
-
-**Check Authentik:**
-```powershell
-Invoke-WebRequest -Uri "https://authentik.test.local" -SkipCertificateCheck
-```
-
-**Check Registry:**
-```cmd
-reg query HKLM\SOFTWARE\AuthentikCredentialProvider
-```
-
-**Check Logs:**
-- Open DebugView as Administrator
-- Attempt login
-- Look for error messages
-
-## Uninstallation
+## Uninstall
 
 ```cmd
-# Run as Administrator
-regsvr32 /u C:\Windows\System32\AuthentikCredentialProvider.dll
-del C:\Windows\System32\AuthentikCredentialProvider.dll
+regsvr32 /u C:\Windows\System32\AuthentikPasswordlessCP.dll
+del C:\Windows\System32\AuthentikPasswordlessCP.dll
+shutdown /r /t 0
 ```
-
-Reboot.
 
 ## Next Steps
 
-1. **Configure Authentik Flow**
-   - Create flow with OTP validation stage
-   - Test flow via web browser first
+1. **Configure Authentik** - Set up flow with certificate issuance
+2. **Configure AD** - Trust Authentik CA in NTAuth store
+3. **Disable `IgnoreCertErrors`** - Use real certificates for production
+4. **Test thoroughly** - Always have recovery access (Safe Mode, local admin)
 
-2. **Security Hardening**
-   - Enable SSL certificate validation
-   - Implement certificate pinning
-   - Use proper API authentication
-
-3. **Production Deployment**
-   - Test thoroughly in lab environment
-   - Deploy via Group Policy
-   - Monitor logs for issues
-
-## Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| DLL won't register | Run as Admin, check architecture (x64) |
-| CP doesn't appear | Reboot, check registry, check Event Viewer |
-| Auth fails | Verify Authentik reachable, check credentials |
-| SSL errors | Check certificate, or disable validation for testing |
-
-## Support
-
-Review:
-1. DebugView logs (`[AuthentikCP]` messages)
-2. Windows Event Viewer (Application log)
-3. Authentik server logs
-4. README.md for detailed documentation
+See **README.md** for full documentation.
