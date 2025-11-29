@@ -8,6 +8,7 @@
 #include <bcrypt.h>
 #include <algorithm>
 #include <sstream>
+#include <new>
 
 #pragma comment(lib, "Crypt32.lib")
 #pragma comment(lib, "NCrypt.lib")
@@ -16,7 +17,7 @@
 #pragma comment(lib, "Shlwapi.lib")
 
 // Microsoft Software Key Storage Provider
-#define MS_KEY_STORAGE_PROVIDER L"Microsoft Software Key Storage Provider"
+static const WCHAR* MS_KEY_STORAGE_PROVIDER_NAME = L"Microsoft Software Key Storage Provider";
 
 // Constructor
 CertificateHelper::CertificateHelper() :
@@ -27,7 +28,7 @@ CertificateHelper::CertificateHelper() :
     // Open the key storage provider
     SECURITY_STATUS status = NCryptOpenStorageProvider(
         &_hProvider,
-        MS_KEY_STORAGE_PROVIDER,
+        MS_KEY_STORAGE_PROVIDER_NAME,
         0);
     
     if (status != ERROR_SUCCESS)
@@ -73,7 +74,7 @@ HRESULT CertificateHelper_CreateInstance(CertificateHelper** ppHelper)
     if (!ppHelper)
         return E_INVALIDARG;
     
-    *ppHelper = new (std::nothrow) CertificateHelper();
+    *ppHelper = new(std::nothrow) CertificateHelper();
     return (*ppHelper) ? S_OK : E_OUTOFMEMORY;
 }
 
@@ -158,7 +159,7 @@ HRESULT CertificateHelper::ParseCertificateBundle(CertificateBundle& bundle)
         }
     }
     
-    LOG("Parsed PEM - Cert: %d bytes, Key: %d bytes", certDer.size(), keyDer.size());
+    LOG("Parsed PEM - Cert: %d bytes, Key: %d bytes", (int)certDer.size(), (int)keyDer.size());
     
     // Create in-memory certificate store
     bundle.hMemStore = CertOpenStore(
@@ -249,7 +250,7 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     BYTE* pCspInfo = NULL;
     DWORD cbCspInfo = 0;
     
-    hr = BuildCspInfo(_containerName, MS_KEY_STORAGE_PROVIDER, &pCspInfo, &cbCspInfo);
+    hr = BuildCspInfo(_containerName, MS_KEY_STORAGE_PROVIDER_NAME, &pCspInfo, &cbCspInfo);
     if (FAILED(hr))
     {
         LOG("Failed to build CSP info: 0x%08x", hr);
@@ -260,18 +261,6 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     DWORD cbDomain = (DWORD)((bundle.domain.length() + 1) * sizeof(WCHAR));
     DWORD cbUsername = (DWORD)((bundle.username.length() + 1) * sizeof(WCHAR));
     DWORD cbPin = sizeof(WCHAR); // Empty pin (just null terminator)
-    
-    // Total size: structure + strings + CSP data
-    // We need to use raw structure layout since SDK may not have KERB_CERTIFICATE_LOGON
-    // Structure layout:
-    // - KERB_LOGON_SUBMIT_TYPE MessageType (4 bytes + padding)
-    // - UNICODE_STRING DomainName (8 bytes on x64)
-    // - UNICODE_STRING UserName (8 bytes on x64)
-    // - UNICODE_STRING Pin (8 bytes on x64)
-    // - ULONG Flags (4 bytes)
-    // - ULONG CspDataLength (4 bytes)
-    // - PUCHAR CspData (8 bytes on x64)
-    // Then string data follows
     
     // Size of base structure (approximation for x64)
     DWORD cbStructure = 64; // Conservative estimate
@@ -290,15 +279,11 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     
     ZeroMemory(pBuffer, cbTotal);
     
-    // For now, we'll use a simpler approach - pack the credential manually
-    // This is a simplified version that may need adjustment based on actual Windows version
-    
     // Set message type at offset 0
     *((DWORD*)pBuffer) = AUTHENTIK_KerbCertificateLogon; // 13 = KerbCertificateLogon
     
     // String data starts after the fixed structure
     BYTE* pStringBuffer = pBuffer + cbStructure;
-    DWORD currentOffset = cbStructure;
     
     // Copy domain string
     memcpy(pStringBuffer, bundle.domain.c_str(), cbDomain);
@@ -308,7 +293,6 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     pDomain->MaximumLength = (USHORT)cbDomain;
     pDomain->Buffer = (PWSTR)pStringBuffer;
     pStringBuffer += cbDomain;
-    currentOffset += cbDomain;
     
     // Copy username string
     memcpy(pStringBuffer, bundle.username.c_str(), cbUsername);
@@ -318,7 +302,6 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     pUser->MaximumLength = (USHORT)cbUsername;
     pUser->Buffer = (PWSTR)pStringBuffer;
     pStringBuffer += cbUsername;
-    currentOffset += cbUsername;
     
     // Pin is empty
     *pStringBuffer = L'\0';
@@ -327,7 +310,6 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     pPin->MaximumLength = (USHORT)cbPin;
     pPin->Buffer = (PWSTR)pStringBuffer;
     pStringBuffer += cbPin;
-    currentOffset += cbPin;
     
     // Set Flags (offset 56)
     *((ULONG*)(pBuffer + 56)) = KERB_CERTIFICATE_LOGON_FLAG_CHECK_DUPLICATES;
@@ -337,8 +319,6 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     
     // Copy CSP data
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
-    // Set CspData pointer (offset 64) - but this needs to be a relative pointer or actual data
-    // For credential provider, the data should be inline
     
     CoTaskMemFree(pCspInfo);
     
@@ -490,7 +470,7 @@ HRESULT CertificateHelper::ImportPrivateKey(
     const std::vector<BYTE>& keyDer,
     NCRYPT_KEY_HANDLE* phKey)
 {
-    LOG("ImportPrivateKey: %d bytes", keyDer.size());
+    LOG("ImportPrivateKey: %d bytes", (int)keyDer.size());
     
     if (!_hProvider)
     {
@@ -518,8 +498,6 @@ HRESULT CertificateHelper::ImportPrivateKey(
         LOG("Not PKCS#8, trying RSA format: %d", dwErr);
         
         // For RSA format, we need to import differently
-        // This is a simplified path - may need more work
-        BCRYPT_KEY_HANDLE hTempKey = 0;
         NCRYPT_KEY_HANDLE hKey = 0;
         
         // Create a new key in the provider
@@ -538,14 +516,11 @@ HRESULT CertificateHelper::ImportPrivateKey(
         }
         
         // For now, we'll need to handle this case differently
-        // This is a placeholder - actual RSA key import is complex
         NCryptFreeObject(hKey);
         return E_NOTIMPL;
     }
     
     // We have PKCS#8 key info, now import via NCrypt
-    // The private key blob is in pKeyInfo->PrivateKey
-    
     BCRYPT_RSAKEY_BLOB* pRsaBlob = NULL;
     DWORD cbRsaBlob = 0;
     
@@ -619,9 +594,10 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
     LOG("AssociateKeyWithCert");
     
     // Set up the key provider info
-    CRYPT_KEY_PROV_INFO keyProvInfo = {0};
-    keyProvInfo.pwszContainerName = (LPWSTR)_containerName.c_str();
-    keyProvInfo.pwszProvName = MS_KEY_STORAGE_PROVIDER;
+    CRYPT_KEY_PROV_INFO keyProvInfo;
+    ZeroMemory(&keyProvInfo, sizeof(keyProvInfo));
+    keyProvInfo.pwszContainerName = const_cast<LPWSTR>(_containerName.c_str());
+    keyProvInfo.pwszProvName = const_cast<LPWSTR>(MS_KEY_STORAGE_PROVIDER_NAME);
     keyProvInfo.dwProvType = 0; // CNG provider
     keyProvInfo.dwFlags = 0;
     keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
@@ -638,7 +614,8 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
     }
     
     // Also set the NCRYPT key handle directly
-    CERT_KEY_CONTEXT keyContext = {0};
+    CERT_KEY_CONTEXT keyContext;
+    ZeroMemory(&keyContext, sizeof(keyContext));
     keyContext.cbSize = sizeof(keyContext);
     keyContext.hNCryptKey = hKey;
     keyContext.dwKeySpec = CERT_NCRYPT_KEY_SPEC;
