@@ -12,7 +12,7 @@
 AuthentikAPI::AuthentikAPI() :
     _serverUrl(L"authentik.test.local"),
     _serverPort(443),
-    _flowSlug(L"windows-passwordless"),
+    _flowSlug(L"default-authentication-flow"),
     _useHttps(true),
     _ignoreCertErrors(true),
     _domain(L"TEST"),
@@ -46,16 +46,37 @@ AuthentikResponse AuthentikAPI::SubmitUsername(const std::wstring& username)
     AuthentikResponse response;
     _currentUsername = username;
     
-    // Build request URL - flow executor endpoint
+    // First, we need to GET the flow to start a session and get the challenge
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
     
-    // Build JSON payload for identification stage
-    std::wstring payload = L"{\"uid_field\":\"" + username + L"\"}";
-    
-    // Make HTTP request
     std::wstring responseBody;
     DWORD statusCode = 0;
-    HRESULT hr = _MakeHttpRequest(L"POST", url, payload, responseBody, statusCode);
+    
+    // GET request to initiate flow
+    HRESULT hr = _MakeHttpRequest(L"GET", url, L"", responseBody, statusCode);
+    
+    if (FAILED(hr))
+    {
+        LOG("GET flow failed: 0x%08x", hr);
+        response.status = AuthStatus::ERROR_NETWORK;
+        response.message = L"Failed to connect to authentication server";
+        return response;
+    }
+    
+    LOG("GET flow response: status=%d", statusCode);
+    
+    if (statusCode == 404)
+    {
+        LOG("Flow not found: %S", _flowSlug.c_str());
+        response.status = AuthStatus::ERROR_SERVER;
+        response.message = L"Authentication flow not found on server";
+        return response;
+    }
+    
+    // Now POST the username
+    std::wstring payload = L"{\"uid_field\":\"" + _EscapeJson(username) + L"\"}";
+    
+    hr = _MakeHttpRequest(L"POST", url, payload, responseBody, statusCode);
     
     if (FAILED(hr))
     {
@@ -66,6 +87,14 @@ AuthentikResponse AuthentikAPI::SubmitUsername(const std::wstring& username)
     }
     
     LOG("SubmitUsername response: status=%d, length=%d", statusCode, (int)responseBody.length());
+    
+    if (statusCode >= 400)
+    {
+        LOG("Server error: %d", statusCode);
+        response.status = AuthStatus::ERROR_SERVER;
+        response.message = L"Server error: " + std::to_wstring(statusCode);
+        return response;
+    }
     
     // Parse response
     response = _ParseAuthentikResponse(responseBody);
@@ -85,7 +114,7 @@ AuthentikResponse AuthentikAPI::SubmitOTP(const std::wstring& otp)
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
     
     // Build JSON payload for OTP stage
-    std::wstring payload = L"{\"code\":\"" + otp + L"\"}";
+    std::wstring payload = L"{\"code\":\"" + _EscapeJson(otp) + L"\"}";
     
     // Make HTTP request (cookies maintain session)
     std::wstring responseBody;
@@ -102,6 +131,14 @@ AuthentikResponse AuthentikAPI::SubmitOTP(const std::wstring& otp)
     
     LOG("SubmitOTP response: status=%d, length=%d", statusCode, (int)responseBody.length());
     
+    if (statusCode >= 400)
+    {
+        LOG("Server error: %d", statusCode);
+        response.status = AuthStatus::ERROR_SERVER;
+        response.message = L"Server error: " + std::to_wstring(statusCode);
+        return response;
+    }
+    
     // Parse response
     response = _ParseAuthentikResponse(responseBody);
     response.rawResponse = responseBody;
@@ -115,6 +152,28 @@ AuthentikResponse AuthentikAPI::SubmitOTP(const std::wstring& otp)
     }
     
     return response;
+}
+
+// Escape JSON string
+std::wstring AuthentikAPI::_EscapeJson(const std::wstring& input)
+{
+    std::wstring result;
+    result.reserve(input.length() * 2);
+    
+    for (wchar_t ch : input)
+    {
+        switch (ch)
+        {
+        case L'"':  result += L"\\\""; break;
+        case L'\\': result += L"\\\\"; break;
+        case L'\n': result += L"\\n"; break;
+        case L'\r': result += L"\\r"; break;
+        case L'\t': result += L"\\t"; break;
+        default:    result += ch; break;
+        }
+    }
+    
+    return result;
 }
 
 // Load configuration from registry
@@ -314,13 +373,16 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     }
 
     // Send request
+    LPVOID pData = payloadUtf8.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)payloadUtf8.c_str();
+    DWORD dataLen = payloadUtf8.empty() ? 0 : (DWORD)payloadUtf8.length();
+    
     bResult = WinHttpSendRequest(
         hRequest,
         WINHTTP_NO_ADDITIONAL_HEADERS,
         0,
-        payloadUtf8.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)payloadUtf8.c_str(),
-        payloadUtf8.empty() ? 0 : (DWORD)payloadUtf8.length(),
-        payloadUtf8.empty() ? 0 : (DWORD)payloadUtf8.length(),
+        pData,
+        dataLen,
+        dataLen,
         0);
 
     if (!bResult)
@@ -398,9 +460,13 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
                 MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, &wideBuffer[0], wideSize);
                 responseBody = &wideBuffer[0];
                 
-                LOG("Response received: %d bytes", (int)responseBuffer.size());
+                LOG("Response body: %.200S...", responseBody.c_str());
                 hr = S_OK;
             }
+        }
+        else
+        {
+            hr = S_OK; // Empty response is OK
         }
     }
 
@@ -415,20 +481,22 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
 void AuthentikAPI::_SaveCookies(HINTERNET hRequest)
 {
     DWORD dwSize = 0;
+    DWORD dwIndex = 0;
     
-    // Get required buffer size
+    // Query for Set-Cookie headers
     WinHttpQueryHeaders(
         hRequest,
         WINHTTP_QUERY_SET_COOKIE,
         WINHTTP_HEADER_NAME_BY_INDEX,
         NULL,
         &dwSize,
-        WINHTTP_NO_HEADER_INDEX);
+        &dwIndex);
     
     if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && dwSize > 0)
     {
+        dwIndex = 0; // Reset index
+        
         std::vector<WCHAR> buffer(dwSize / sizeof(WCHAR) + 1);
-        DWORD dwIndex = 0;
         
         while (WinHttpQueryHeaders(
             hRequest,
@@ -491,6 +559,8 @@ void AuthentikAPI::_AddCookies(HINTERNET hRequest)
         (DWORD)-1,
         WINHTTP_ADDREQ_FLAG_ADD);
     
+    LOG("Added cookies: %S", cookieHeader.c_str());
+    
     // Add CSRF token if available
     if (!_csrfToken.empty())
     {
@@ -511,67 +581,72 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
     AuthentikResponse response;
     response.status = AuthStatus::FAILED;
 
+    // Log first part of response for debugging
+    LOG("Response preview: %.300S", json.c_str());
+
     // Check for success (redirect type indicates completion)
     if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos ||
         json.find(L"\"type\": \"redirect\"") != std::wstring::npos)
     {
-        // Check if certificate is present
-        if (json.find(L"\"certificate\"") != std::wstring::npos)
+        response.status = AuthStatus::SUCCESS;
+        response.message = L"Authentication successful";
+        
+        // Extract certificate data if present
+        response.certificatePem = _ParseJsonString(json, L"certificate");
+        response.privateKeyPem = _ParseJsonString(json, L"private_key");
+        
+        LOG("Parsed: SUCCESS");
+    }
+    // Check for native flow response (component indicates a stage)
+    else if (json.find(L"\"component\"") != std::wstring::npos)
+    {
+        std::wstring component = _ParseJsonString(json, L"component");
+        LOG("Flow component: %S", component.c_str());
+        
+        if (component.find(L"ak-stage-authenticator") != std::wstring::npos ||
+            component.find(L"totp") != std::wstring::npos ||
+            component.find(L"otp") != std::wstring::npos)
         {
-            response.status = AuthStatus::SUCCESS;
-            response.message = L"Authentication successful";
-            
-            // Extract certificate data
-            response.certificatePem = _ParseJsonString(json, L"certificate");
-            response.privateKeyPem = _ParseJsonString(json, L"private_key");
-            response.username = _ParseJsonString(json, L"username");
-            response.domain = _ParseJsonString(json, L"domain");
-            response.upn = _ParseJsonString(json, L"upn");
-            
-            std::wstring validStr = _ParseJsonString(json, L"valid_minutes");
-            if (!validStr.empty())
-            {
-                response.certValidMinutes = (DWORD)_wtoi(validStr.c_str());
-            }
-            
-            LOG("Parsed: SUCCESS with certificate");
+            response.status = AuthStatus::NEED_OTP;
+            response.message = L"Enter your OTP code";
+            LOG("Parsed: NEED_OTP");
+        }
+        else if (component.find(L"ak-stage-identification") != std::wstring::npos)
+        {
+            response.status = AuthStatus::NEED_USERNAME;
+            response.message = L"Enter your username";
+            LOG("Parsed: NEED_USERNAME");
+        }
+        else if (component.find(L"ak-stage-password") != std::wstring::npos)
+        {
+            // Password stage - for now treat as needing OTP since we're passwordless
+            response.status = AuthStatus::NEED_OTP;
+            response.message = L"Enter your verification code";
+            LOG("Parsed: NEED_OTP (password stage)");
         }
         else
         {
-            // Redirect without certificate - might be intermediate step
-            response.status = AuthStatus::SUCCESS;
-            response.message = L"Authentication successful";
-            LOG("Parsed: SUCCESS (redirect)");
+            // Unknown component, assume OTP needed
+            response.status = AuthStatus::NEED_OTP;
+            response.message = L"Continue authentication";
+            LOG("Parsed: Unknown component, assuming OTP");
         }
     }
-    // Check for OTP challenge
-    else if (json.find(L"ak-stage-authenticator-validate") != std::wstring::npos ||
-             json.find(L"authenticator") != std::wstring::npos ||
-             json.find(L"otp") != std::wstring::npos ||
-             json.find(L"\"code\"") != std::wstring::npos)
-    {
-        response.status = AuthStatus::NEED_OTP;
-        response.message = L"Enter your OTP code";
-        LOG("Parsed: NEED_OTP");
-    }
-    // Check for identification stage (need username)
-    else if (json.find(L"ak-stage-identification") != std::wstring::npos ||
-             json.find(L"uid_field") != std::wstring::npos)
-    {
-        response.status = AuthStatus::NEED_USERNAME;
-        response.message = L"Enter your username";
-        LOG("Parsed: NEED_USERNAME");
-    }
-    // Check for error
-    else if (json.find(L"\"error\"") != std::wstring::npos ||
-             json.find(L"\"detail\"") != std::wstring::npos)
+    // Check for error response
+    else if (json.find(L"\"detail\"") != std::wstring::npos)
     {
         response.status = AuthStatus::FAILED;
         response.message = _ParseJsonString(json, L"detail");
         if (response.message.empty())
         {
-            response.message = _ParseJsonString(json, L"error");
+            response.message = L"Authentication failed";
         }
+        LOG("Parsed: FAILED - %S", response.message.c_str());
+    }
+    else if (json.find(L"\"error\"") != std::wstring::npos)
+    {
+        response.status = AuthStatus::FAILED;
+        response.message = _ParseJsonString(json, L"error");
         if (response.message.empty())
         {
             response.message = L"Authentication failed";
@@ -580,10 +655,10 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
     }
     else
     {
-        // Unknown response - might be a challenge we don't recognize
-        response.status = AuthStatus::NEED_OTP;
-        response.message = L"Enter your verification code";
-        LOG("Parsed: Unknown format, assuming OTP needed");
+        // Unknown response format
+        response.status = AuthStatus::FAILED;
+        response.message = L"Unknown server response";
+        LOG("Parsed: Unknown response format");
     }
 
     return response;
@@ -604,16 +679,20 @@ std::wstring AuthentikAPI::_ParseJsonString(const std::wstring& json, const std:
     if (colonPos == std::wstring::npos)
         return L"";
     
-    // Find the opening quote
-    size_t startQuote = json.find(L'"', colonPos + 1);
-    if (startQuote == std::wstring::npos)
+    // Skip whitespace
+    size_t startQuote = colonPos + 1;
+    while (startQuote < json.length() && (json[startQuote] == L' ' || json[startQuote] == L'\t'))
+        startQuote++;
+    
+    // Check for opening quote
+    if (startQuote >= json.length() || json[startQuote] != L'"')
         return L"";
     
     // Find the closing quote (handle escaped quotes)
     size_t endQuote = startQuote + 1;
     while (endQuote < json.length())
     {
-        if (json[endQuote] == L'"' && (endQuote == 0 || json[endQuote - 1] != L'\\'))
+        if (json[endQuote] == L'"' && json[endQuote - 1] != L'\\')
             break;
         endQuote++;
     }
