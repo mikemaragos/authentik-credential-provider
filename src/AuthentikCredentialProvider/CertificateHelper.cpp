@@ -796,6 +796,8 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     std::wstring username = bundle.username.empty() ? L"" : bundle.username;
     std::wstring pin = L"";  // No PIN needed - OTP was already validated
 
+    LOG("Building logon: domain='%S', username='%S'", domain.c_str(), username.c_str());
+
     DWORD cbDomain = (DWORD)((domain.length() + 1) * sizeof(WCHAR));
     DWORD cbUsername = (DWORD)((username.length() + 1) * sizeof(WCHAR));
     DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
