@@ -29,16 +29,16 @@ struct FIELD_STATE_PAIR
     CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE cpfis;
 };
 
-// Field descriptors
+// Field descriptors - Note: pszLabel requires LPWSTR, so we cast from const
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
-    { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                      CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless",    GUID_NULL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Enter your username",       GUID_NULL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",                  GUID_NULL },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, L"Authentication Code",       GUID_NULL },
-    { FID_PIN,        CPFT_PASSWORD_TEXT, L"Smart Card PIN",            GUID_NULL },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",                   GUID_NULL },
+    { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),                      CPFG_CREDENTIAL_PROVIDER_LOGO },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik Passwordless"),    GUID_NULL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Enter your username"),       GUID_NULL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),                  GUID_NULL },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"Authentication Code"),       GUID_NULL },
+    { FID_PIN,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"Smart Card PIN"),            GUID_NULL },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),                   GUID_NULL },
 };
 
 // Initial field state pairs - username step
