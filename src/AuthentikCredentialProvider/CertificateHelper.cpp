@@ -420,6 +420,36 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
     {
         CertAddCertificateContextToStore(bundle.hMemStore, pCert, CERT_STORE_ADD_ALWAYS, NULL);
     }
+    
+    // Also add to machine MY store so Kerberos can find it for PKINIT
+    HCERTSTORE hMyStore = CertOpenStore(
+        CERT_STORE_PROV_SYSTEM,
+        0,
+        0,
+        CERT_SYSTEM_STORE_LOCAL_MACHINE,
+        L"MY");
+    
+    if (hMyStore)
+    {
+        PCCERT_CONTEXT pStoredCert = NULL;
+        if (CertAddCertificateContextToStore(hMyStore, pCert, CERT_STORE_ADD_REPLACE_EXISTING, &pStoredCert))
+        {
+            LOG("Certificate added to machine MY store for PKINIT");
+            if (pStoredCert)
+            {
+                CertFreeCertificateContext(pStoredCert);
+            }
+        }
+        else
+        {
+            LOG("Failed to add cert to MY store: %d", GetLastError());
+        }
+        CertCloseStore(hMyStore, 0);
+    }
+    else
+    {
+        LOG("Failed to open machine MY store: %d", GetLastError());
+    }
 
     // Clean up - DON'T close hKey if we need it, but do close the temp store
     CertFreeCertificateContext(pCert);
