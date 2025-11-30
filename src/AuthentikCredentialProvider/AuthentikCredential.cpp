@@ -5,10 +5,19 @@
 #include "Logger.h"
 #include "AuthentikAPI.h"
 #include "SmartCardHelper.h"
+
+#include <windows.h>
 #include <wincred.h>
 #include <ntsecapi.h>
+#include <shlwapi.h>
+#include <shlguid.h>
 
 #pragma comment(lib, "credui.lib")
+#pragma comment(lib, "shlwapi.lib")
+
+// DLL reference counting (defined in Dll.cpp)
+extern void DllAddRef();
+extern void DllRelease();
 
 // Field state pairs for different usage scenarios
 static const FIELD_STATE_PAIR s_rgFieldStatePairsLogon[] =
