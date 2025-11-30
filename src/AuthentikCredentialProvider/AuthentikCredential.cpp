@@ -612,9 +612,42 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
             _certBundle.pfxBase64 = response.pfxBase64;
             _certBundle.pfxPassword = response.pfxPassword;
             
-            // Use response username/domain if provided, otherwise use authenticated values
-            _certBundle.username = response.username.empty() ? _username : response.username;
-            _certBundle.domain = response.domain.empty() ? _domain : response.domain;
+            // Use response username/domain if provided, otherwise parse from authenticated username
+            if (!response.username.empty())
+            {
+                _certBundle.username = response.username;
+            }
+            else if (_rgFieldStrings[FID_USERNAME] != NULL)
+            {
+                // Parse domain\user format
+                std::wstring fullUsername = _rgFieldStrings[FID_USERNAME];
+                size_t pos = fullUsername.find(L'\\');
+                if (pos != std::wstring::npos)
+                {
+                    _certBundle.domain = fullUsername.substr(0, pos);
+                    _certBundle.username = fullUsername.substr(pos + 1);
+                }
+                else
+                {
+                    _certBundle.username = fullUsername;
+                }
+            }
+            
+            if (!response.domain.empty())
+            {
+                _certBundle.domain = response.domain;
+            }
+            // If domain still empty, try to get from computer's domain
+            if (_certBundle.domain.empty())
+            {
+                WCHAR domainName[256] = {0};
+                DWORD size = 256;
+                if (GetComputerNameExW(ComputerNameDnsDomain, domainName, &size) && size > 0)
+                {
+                    _certBundle.domain = domainName;
+                }
+            }
+            
             _certBundle.upn = response.upn;
             _certBundle.validMinutes = response.certValidMinutes > 0 ? response.certValidMinutes : 60;
             
@@ -643,8 +676,40 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
                     &_certBundle.privateKey[0], keySize, NULL, NULL);
             }
             
-            _certBundle.username = response.username.empty() ? _username : response.username;
-            _certBundle.domain = response.domain.empty() ? _domain : response.domain;
+            // Use response username/domain if provided, otherwise parse from authenticated username
+            if (!response.username.empty())
+            {
+                _certBundle.username = response.username;
+            }
+            else if (_rgFieldStrings[FID_USERNAME] != NULL)
+            {
+                std::wstring fullUsername = _rgFieldStrings[FID_USERNAME];
+                size_t pos = fullUsername.find(L'\\');
+                if (pos != std::wstring::npos)
+                {
+                    _certBundle.domain = fullUsername.substr(0, pos);
+                    _certBundle.username = fullUsername.substr(pos + 1);
+                }
+                else
+                {
+                    _certBundle.username = fullUsername;
+                }
+            }
+            
+            if (!response.domain.empty())
+            {
+                _certBundle.domain = response.domain;
+            }
+            if (_certBundle.domain.empty())
+            {
+                WCHAR domainName[256] = {0};
+                DWORD size = 256;
+                if (GetComputerNameExW(ComputerNameDnsDomain, domainName, &size) && size > 0)
+                {
+                    _certBundle.domain = domainName;
+                }
+            }
+            
             _certBundle.upn = response.upn;
             _certBundle.validMinutes = response.certValidMinutes;
             
