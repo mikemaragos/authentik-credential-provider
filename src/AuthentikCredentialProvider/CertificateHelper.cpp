@@ -1071,8 +1071,30 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
 {
     LOG("AssociateKeyWithCert");
 
+    // Get the actual container name from the key handle
+    std::wstring actualContainerName = _containerName;
+    
+    if (hKey)
+    {
+        WCHAR wszKeyName[256] = {0};
+        DWORD cbKeyName = sizeof(wszKeyName);
+        SECURITY_STATUS status = NCryptGetProperty(
+            hKey,
+            NCRYPT_NAME_PROPERTY,
+            (PBYTE)wszKeyName,
+            cbKeyName,
+            &cbKeyName,
+            0);
+        
+        if (status == ERROR_SUCCESS && wszKeyName[0] != L'\0')
+        {
+            actualContainerName = wszKeyName;
+            LOG("Using key's actual container name: %S", actualContainerName.c_str());
+        }
+    }
+
     CRYPT_KEY_PROV_INFO keyProvInfo = {0};
-    keyProvInfo.pwszContainerName = (LPWSTR)_containerName.c_str();
+    keyProvInfo.pwszContainerName = (LPWSTR)actualContainerName.c_str();
     keyProvInfo.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
     keyProvInfo.dwProvType = 0;
     keyProvInfo.dwFlags = CRYPT_MACHINE_KEYSET;
