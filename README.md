@@ -1,162 +1,135 @@
 # Authentik Credential Provider for Windows
 
-A Windows Credential Provider that integrates with Authentik for passwordless domain authentication using certificates and PKINIT.
+A Windows Credential Provider that enables passwordless authentication using Authentik as the identity provider.
 
-## Features
+## Current Status: Research Phase
 
-- **True Passwordless**: No AD password required at the Windows logon screen
-- **OTP Validation**: Authenticate with username + OTP only
-- **Certificate-Based**: Uses X.509 certificates for Kerberos PKINIT authentication
-- **Custom KSP**: Includes a Key Storage Provider for certificate-based Windows logon
-- **Enterprise Ready**: Integrates with Active Directory Certificate Services (AD CS)
+**Important Discovery:** Windows PKINIT (certificate-based Kerberos authentication) requires a **smart card-compatible Key Storage Provider**. Software-based certificate storage does NOT work for domain logon, even with correctly structured KERB_CERTIFICATE_LOGON.
 
-## Architecture
+### What Works
+- OTP authentication flow with Authentik API
+- Certificate issuance from Authentik/internal CA
+- Certificate storage in Windows certificate stores
+- TPM Virtual Smart Card creation and certificate enrollment
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    AUTHENTICATION FLOW                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  1. User enters username + OTP at Windows logon                  │
-│  2. Credential Provider validates OTP with Authentik             │
-│  3. Authentik triggers certificate issuance from AD CS           │
-│  4. Certificate + private key returned to workstation            │
-│  5. Key stored in Authentik KSP shared memory                    │
-│  6. KERB_CERTIFICATE_LOGON sent to Windows LSA                   │
-│  7. Kerberos uses our KSP to sign PKINIT request                 │
-│  8. Domain Controller validates certificate, issues TGT          │
-│  9. User logged in - no password used!                           │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+### What Doesn't Work (Yet)
+- PKINIT with software-based KSP (Microsoft Software KSP, Passport KSP)
+- Direct KERB_CERTIFICATE_LOGON without smart card hardware/VSC
 
-## Components
+## Recommended Approach
 
-| Component | Description | Location |
-|-----------|-------------|----------|
-| **AuthentikCredentialProvider.dll** | Windows Credential Provider | `src/AuthentikCredentialProvider/` |
-| **AuthentikKSP.dll** | Custom Key Storage Provider | `src/AuthentikKSP/` |
-| **CertIssuerService.ps1** | Certificate issuer service | `tools/cert-issuer/` |
-| **Test-PKINITAuth.ps1** | Diagnostic tool | `tools/diagnostics/` |
+Use **TPM Virtual Smart Card** for true PKINIT authentication. See [VSC-PKINIT-GUIDE.md](VSC-PKINIT-GUIDE.md) for complete instructions.
 
-## Prerequisites
+## Architecture Options
 
-- Windows 10/11 or Windows Server 2016+
-- Active Directory domain
-- Active Directory Certificate Services (AD CS)
-- Authentik server with OTP configured
-- Visual Studio 2022 (for building)
+### Option 1: VSC + CSR-based Enrollment (Recommended)
+1. User authenticates with Authentik (OTP)
+2. Credential provider generates key on VSC
+3. CSR sent to Authentik for signing
+4. Certificate imported to VSC
+5. PKINIT logon with VSC
 
-## Quick Start
+### Option 2: Password Caching (Fallback)
+1. User authenticates with Authentik (OTP)
+2. Cached domain password used for Kerberos
+3. Less secure but simpler implementation
 
-See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed installation instructions.
+### Option 3: AD FS Integration
+1. Configure AD FS with Authentik as claims provider
+2. Use existing smart card infrastructure
+3. Requires AD FS deployment
 
-### Build
+## Building
 
-```cmd
-# Build KSP
-cd src\AuthentikKSP
-msbuild AuthentikKSP.vcxproj /p:Configuration=Release /p:Platform=x64
+### Prerequisites
+- Visual Studio 2019 or later
+- Windows SDK
+- C++ Desktop Development workload
 
-# Build Credential Provider
-cd src\AuthentikCredentialProvider
-msbuild AuthentikCredentialProvider.vcxproj /p:Configuration=Release /p:Platform=x64
-```
-
-### Install
-
-```powershell
-# Copy DLLs
-Copy-Item "AuthentikKSP.dll" "C:\Windows\System32\"
-Copy-Item "AuthentikCredentialProvider.dll" "C:\Windows\System32\"
-
-# Register KSP (see docs/DEPLOYMENT.md for full script)
-# Register Credential Provider
-regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
-
-# Configure (see docs/DEPLOYMENT.md)
-# Reboot
-```
+### Build Steps
+1. Open `AuthentikCredentialProvider.sln` in Visual Studio
+2. Select Release/x64 configuration
+3. Build solution
+4. Copy DLL to `C:\Windows\System32\`
+5. Register with `regsvr32 AuthentikCredentialProvider.dll`
 
 ## Configuration
 
-Registry settings at `HKLM\SOFTWARE\AuthentikCredentialProvider`:
+Edit `%PROGRAMDATA%\AuthentikCredentialProvider\config.json`:
 
-| Key | Type | Description |
-|-----|------|-------------|
-| ServerUrl | REG_SZ | Authentik server hostname |
-| ServerPort | REG_DWORD | Server port (default: 443) |
-| FlowSlug | REG_SZ | Authentik flow slug |
-| UseHttps | REG_DWORD | Use HTTPS (1) or HTTP (0) |
-| CertIssuerUrl | REG_SZ | Certificate issuer service URL |
-| CertIssuerToken | REG_SZ | API token for cert issuer |
-| Domain | REG_SZ | NetBIOS domain name |
-| DomainFQDN | REG_SZ | FQDN of domain |
+```json
+{
+  "authentik_url": "https://authentik.example.com",
+  "client_id": "your-client-id",
+  "flow_slug": "your-flow-slug"
+}
+```
 
-## Documentation
+## Project Structure
 
-- [Deployment Guide](docs/DEPLOYMENT.md) - Complete installation instructions
-- [KSP README](src/AuthentikKSP/README.md) - Key Storage Provider details
-- [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues and solutions
+```
+src/
+├── AuthentikCredentialProvider/
+│   ├── AuthentikCredential.cpp      # Main credential implementation
+│   ├── AuthentikProvider.cpp        # Provider registration
+│   ├── CertificateHelper.cpp        # Certificate operations
+│   ├── AuthentikAPI.cpp             # Authentik API client
+│   └── ...
+├── AuthentikKSP/                    # Custom KSP (experimental)
+└── Shared/                          # Shared utilities
+```
 
-## How It Works
+## Key Files
 
-### The Custom KSP
+- `CertificateHelper.cpp` - Certificate import, CSP info building, PKINIT structures
+- `AuthentikCredential.cpp` - Logon flow, credential packaging
+- `VSC-PKINIT-GUIDE.md` - Complete guide for VSC-based authentication
 
-Windows Kerberos expects private keys to be available through a Key Storage Provider (KSP). 
-Normally, this is handled by a smart card or TPM. Our custom KSP:
+## Technical Notes
 
-1. Stores certificates and private keys in secure shared memory
-2. Provides keys to Kerberos when it needs to sign PKINIT requests
-3. Cleans up keys after a configurable timeout
+### Why Software KSP Fails for PKINIT
 
-### PKINIT Authentication
+The Windows Kerberos SSP validates that certificates used for PKINIT come from smart card-compatible providers. When using KERB_CERTIFICATE_LOGON with software-based keys:
 
-Instead of sending a password hash to the Domain Controller, PKINIT:
+1. Kerberos SSP receives the logon request
+2. Checks the CSP/KSP provider type
+3. Rejects non-smart-card providers
+4. Falls back to password authentication (which fails with empty password)
 
-1. Signs an authentication request with the user's private key
-2. Includes the user's certificate in the request
-3. The DC verifies the certificate chain and signature
-4. Issues a TGT if valid (no password needed!)
+Evidence in Kerberos debug logs:
+```
+Error Code: 0x19 KDC_ERR_PREAUTH_REQUIRED
+Client Realm: (empty)
+Client Name: (empty)
+```
 
-## Security Considerations
+Empty client realm/name indicates PKINIT was not attempted.
 
-- Keys are stored temporarily in memory (not on disk)
-- Keys auto-expire after configurable timeout
-- OTP provides the "something you have" factor
-- Certificate provides cryptographic proof of identity
-- No passwords stored or transmitted
+### Certificate Requirements for Smart Card Logon
 
-### Production Hardening
+1. **EKUs:**
+   - Smart Card Logon (1.3.6.1.4.1.311.20.2.2)
+   - Client Authentication (1.3.6.1.5.5.7.3.2)
 
-- Enable SSL certificate validation
-- Code sign the DLLs
-- Encrypt sensitive registry values with DPAPI
-- Restrict registry permissions
+2. **Subject Alternative Name:**
+   - Must contain UPN matching AD user's userPrincipalName
+   - Format: `shop@test.local`
 
-## Troubleshooting
+3. **Key Storage:**
+   - Must be on smart card or TPM Virtual Smart Card
+   - Private key never exportable
 
-### Debug Logging
+4. **Trust Chain:**
+   - CA must be in NTAuth store
+   - DC must have valid KDC certificate
 
-Use DebugView to capture logs:
-- Filter: `[AuthentikCP]` for credential provider
-- Filter: `[AuthentikKSP]` for KSP
+## Contributing
 
-### Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| Credential provider not showing | Reboot, check registration |
-| "Key not found" errors | Verify KSP is registered |
-| Pre-Auth Type 2 in logs | KSP not being called, check CSP info |
-| Certificate trust errors | Verify CA in NTAuth store |
+This is an experimental project. Contributions welcome, especially:
+- VSC integration code
+- CSR generation on smart card
+- Authentik CSR signing endpoint
 
 ## License
 
-This project is provided as-is for educational and enterprise use.
-
-## Acknowledgments
-
-- Microsoft Windows Credential Provider samples
-- Authentik project
-- PrivacyIDEA credential provider for inspiration
+MIT License
