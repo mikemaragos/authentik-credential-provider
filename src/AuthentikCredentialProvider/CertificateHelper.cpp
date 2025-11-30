@@ -1,6 +1,29 @@
 // CertificateHelper.cpp
 // Certificate parsing, import, and management for PKINIT authentication
-// Updated to use Authentik KSP for key storage
+//
+// IMPORTANT DISCOVERY (November 2025):
+// ====================================
+// Windows PKINIT (KERB_CERTIFICATE_LOGON) requires a SMART CARD-COMPATIBLE
+// Key Storage Provider. Software-based KSPs (Microsoft Software KSP, 
+// Microsoft Passport KSP without WHfB enrollment, custom KSPs) do NOT work
+// for domain logon.
+//
+// The Windows Kerberos SSP validates the provider type and rejects
+// non-smart-card certificates at the SSP level, BEFORE reaching the KDC.
+// Evidence: Kerberos logs show empty Client Realm/Name, indicating PKINIT
+// was never attempted.
+//
+// SOLUTION: Use TPM Virtual Smart Card
+// - Generate key ON the VSC using certreq with "Microsoft Base Smart Card Crypto Provider"
+// - Get certificate signed by CA (must include UPN in SAN)
+// - Import certificate to VSC with certreq -accept
+// - Use standard Windows smart card logon
+//
+// See VSC-PKINIT-GUIDE.md for complete instructions.
+//
+// The code below for software-based PKINIT is preserved for reference but
+// DOES NOT WORK for actual domain authentication.
+// ====================================
 
 #include "CertificateHelper.h"
 #include "Logger.h"
