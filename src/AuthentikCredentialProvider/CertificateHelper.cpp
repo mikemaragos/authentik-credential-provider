@@ -268,12 +268,37 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
     pfxBlob.cbData = (DWORD)pfxData.size();
     pfxBlob.pbData = pfxData.data();
 
-    // Import PFX - we need CRYPT_EXPORTABLE to get the key out
-    // Use MACHINE keyset so SYSTEM and Kerberos can access it
+    // First, open the machine MY store
+    HCERTSTORE hMyStore = CertOpenStore(
+        CERT_STORE_PROV_SYSTEM,
+        0,
+        0,
+        CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_OPEN_EXISTING_FLAG,
+        L"MY");
+    
+    if (!hMyStore)
+    {
+        LOG("Failed to open machine MY store: %d", GetLastError());
+    }
+
+    // Import PFX - use MACHINE keyset so SYSTEM and Kerberos can access it
+    // Also use PKCS12_ALWAYS_CNG_KSP to ensure MS Software KSP is used
     HCERTSTORE hTempStore = PFXImportCertStore(
         &pfxBlob,
         bundle.pfxPassword.c_str(),
-        CRYPT_EXPORTABLE | CRYPT_MACHINE_KEYSET);
+        CRYPT_EXPORTABLE | CRYPT_MACHINE_KEYSET | PKCS12_ALWAYS_CNG_KSP);
+
+    if (hTempStore == NULL)
+    {
+        DWORD err = GetLastError();
+        LOG("PFXImportCertStore (machine/CNG) failed: %d, trying without CNG flag", err);
+        
+        // Try without PKCS12_ALWAYS_CNG_KSP
+        hTempStore = PFXImportCertStore(
+            &pfxBlob,
+            bundle.pfxPassword.c_str(),
+            CRYPT_EXPORTABLE | CRYPT_MACHINE_KEYSET);
+    }
 
     if (hTempStore == NULL)
     {
@@ -290,6 +315,7 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
     if (hTempStore == NULL)
     {
         LOG("PFXImportCertStore failed: %d", GetLastError());
+        if (hMyStore) CertCloseStore(hMyStore, 0);
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
@@ -421,41 +447,44 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
         CertAddCertificateContextToStore(bundle.hMemStore, pCert, CERT_STORE_ADD_ALWAYS, NULL);
     }
     
-    // Also add to machine MY store so Kerberos can find it for PKINIT
-    HCERTSTORE hMyStore = CertOpenStore(
-        CERT_STORE_PROV_SYSTEM,
-        0,
-        0,
-        CERT_SYSTEM_STORE_LOCAL_MACHINE,
-        L"MY");
-    
+    // Add certificate (with key link) to machine MY store so Kerberos can find it for PKINIT
+    // The cert from PFXImportCertStore already has key info attached
     if (hMyStore)
     {
         PCCERT_CONTEXT pStoredCert = NULL;
-        if (CertAddCertificateContextToStore(hMyStore, pCert, CERT_STORE_ADD_REPLACE_EXISTING, &pStoredCert))
+        // Use CERT_STORE_ADD_REPLACE_EXISTING_INHERIT_PROPERTIES to preserve key link
+        if (CertAddCertificateContextToStore(hMyStore, pCert, CERT_STORE_ADD_REPLACE_EXISTING_INHERIT_PROPERTIES, &pStoredCert))
         {
             LOG("Certificate added to machine MY store for PKINIT");
+            
+            // Update bundle to use the stored cert
             if (pStoredCert)
             {
-                CertFreeCertificateContext(pStoredCert);
+                CertFreeCertificateContext(bundle.pCertContext);
+                bundle.pCertContext = pStoredCert;  // Keep this one
             }
         }
         else
         {
             LOG("Failed to add cert to MY store: %d", GetLastError());
         }
-        CertCloseStore(hMyStore, 0);
     }
     else
     {
-        LOG("Failed to open machine MY store: %d", GetLastError());
+        LOG("Machine MY store not available - cert will not persist");
     }
 
-    // Clean up - DON'T close hKey if we need it, but do close the temp store
+    // Clean up - DON'T close hKey if we need it
     CertFreeCertificateContext(pCert);
-    // Note: We keep hTempStore open if we still need hKey from it
-    // Actually, the key should persist as long as bundle.hKey is valid
+    
+    // Close the temp store - we've moved the cert to MY
     CertCloseStore(hTempStore, 0);
+    
+    // Close MY store - cert is persisted
+    if (hMyStore)
+    {
+        CertCloseStore(hMyStore, 0);
+    }
 
     // If we got the key blob, we're good
     if (!bundle.privateKeyBlob.empty())
