@@ -653,12 +653,23 @@ HRESULT CertificateHelper::BuildCertificateLogon(
         return HRESULT_FROM_WIN32(status);
     }
 
-    // Import the private key
+    // Build parameter list with key name
+    NCryptBuffer keyNameBuffer = {0};
+    keyNameBuffer.cbBuffer = (DWORD)((_containerName.length() + 1) * sizeof(WCHAR));
+    keyNameBuffer.BufferType = NCRYPTBUFFER_PKCS_KEY_NAME;
+    keyNameBuffer.pvBuffer = (PVOID)_containerName.c_str();
+
+    NCryptBufferDesc paramList = {0};
+    paramList.ulVersion = NCRYPTBUFFER_VERSION;
+    paramList.cBuffers = 1;
+    paramList.pBuffers = &keyNameBuffer;
+
+    // Import the private key with name
     status = NCryptImportKey(
         hProvider,
         0,
         BCRYPT_RSAPRIVATE_BLOB,
-        NULL,
+        &paramList,
         &hImportedKey,
         privateKeyBlob.data(),
         (DWORD)privateKeyBlob.size(),
@@ -667,30 +678,6 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     if (status != ERROR_SUCCESS)
     {
         LOG("NCryptImportKey failed: 0x%08x", status);
-        NCryptFreeObject(hProvider);
-        return HRESULT_FROM_WIN32(status);
-    }
-
-    // Set key name/container
-    status = NCryptSetProperty(
-        hImportedKey,
-        NCRYPT_NAME_PROPERTY,
-        (PBYTE)_containerName.c_str(),
-        (DWORD)((_containerName.length() + 1) * sizeof(WCHAR)),
-        0);
-
-    if (status != ERROR_SUCCESS)
-    {
-        LOG("Warning: Failed to set key name: 0x%08x", status);
-        // Continue anyway - key is imported
-    }
-
-    // Finalize the key
-    status = NCryptFinalizeKey(hImportedKey, 0);
-    if (status != ERROR_SUCCESS)
-    {
-        LOG("NCryptFinalizeKey failed: 0x%08x", status);
-        NCryptFreeObject(hImportedKey);
         NCryptFreeObject(hProvider);
         return HRESULT_FROM_WIN32(status);
     }
