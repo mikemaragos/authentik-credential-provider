@@ -1,27 +1,20 @@
 // AuthentikCredentialProvider.cpp
-// Main credential provider implementation for passwordless authentication
+// Main credential provider implementation
 
 #include "AuthentikCredentialProvider.h"
 #include "AuthentikCredential.h"
 #include "Logger.h"
 #include "guid.h"
 #include <credentialprovider.h>
-#include <NTSecAPI.h>
-#include <shlwapi.h>
-#include <new>
-
-#pragma comment(lib, "Secur32.lib")
-#pragma comment(lib, "Shlwapi.lib")
-
-// Negotiate package name
-#define NEGOSSP_NAME_A   "Negotiate"
 
 // Constructor
 CAuthentikProvider::CAuthentikProvider() :
     _cRef(1),
+    _pkiulSetSerialization(nullptr),
+    _dwSetSerializationCred(CREDENTIAL_PROVIDER_NO_DEFAULT),
     _cpus(CPUS_INVALID),
-    _pCredential(NULL),
-    _upAdviseContext(0),
+    _pCredential(nullptr),
+    _upAdviseContext(nullptr),
     _ulAuthPackage(0)
 {
     DllAddRef();
@@ -33,10 +26,16 @@ CAuthentikProvider::~CAuthentikProvider()
 {
     LOG("CAuthentikProvider::Destructor");
     
-    if (_pCredential != NULL)
+    if (_pCredential != nullptr)
     {
         _pCredential->Release();
-        _pCredential = NULL;
+        _pCredential = nullptr;
+    }
+
+    if (_pkiulSetSerialization)
+    {
+        HeapFree(GetProcessHeap(), 0, _pkiulSetSerialization);
+        _pkiulSetSerialization = nullptr;
     }
 
     DllRelease();
@@ -86,7 +85,7 @@ HRESULT CAuthentikProvider::SetUsageScenario(
         // Support these scenarios
         _cpus = cpus;
 
-        // Get authentication package (Kerberos for PKINIT)
+        // Get authentication package
         hr = _GetAuthenticationPackageId();
         if (FAILED(hr))
         {
@@ -95,7 +94,7 @@ HRESULT CAuthentikProvider::SetUsageScenario(
         break;
 
     case CPUS_CHANGE_PASSWORD:
-        // Not supported for passwordless
+        // Not supported
         hr = E_NOTIMPL;
         break;
 
@@ -116,8 +115,34 @@ HRESULT CAuthentikProvider::SetSerialization(
     const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs)
 {
     LOG("CAuthentikProvider::SetSerialization");
-    UNREFERENCED_PARAMETER(pcpcs);
-    return E_NOTIMPL;
+
+    HRESULT hr = E_NOTIMPL;
+
+    // Store the serialization for later use during GetCredentialCount
+    if (pcpcs)
+    {
+        if (_pkiulSetSerialization)
+        {
+            HeapFree(GetProcessHeap(), 0, _pkiulSetSerialization);
+        }
+
+        _pkiulSetSerialization = (KERB_INTERACTIVE_UNLOCK_LOGON*)HeapAlloc(
+            GetProcessHeap(), 
+            0, 
+            pcpcs->cbSerialization);
+
+        if (_pkiulSetSerialization)
+        {
+            CopyMemory(_pkiulSetSerialization, pcpcs->rgbSerialization, pcpcs->cbSerialization);
+            hr = S_OK;
+        }
+        else
+        {
+            hr = E_OUTOFMEMORY;
+        }
+    }
+
+    return hr;
 }
 
 HRESULT CAuthentikProvider::Advise(
@@ -125,7 +150,6 @@ HRESULT CAuthentikProvider::Advise(
     UINT_PTR upAdviseContext)
 {
     LOG("CAuthentikProvider::Advise");
-    UNREFERENCED_PARAMETER(pcpe);
 
     if (_upAdviseContext != 0)
     {
@@ -147,7 +171,7 @@ HRESULT CAuthentikProvider::UnAdvise()
 HRESULT CAuthentikProvider::GetFieldDescriptorCount(DWORD* pdwCount)
 {
     LOG("CAuthentikProvider::GetFieldDescriptorCount");
-    *pdwCount = FID_NUM_FIELDS;
+    *pdwCount = ARRAYSIZE(s_rgFieldDescriptors);
     return S_OK;
 }
 
@@ -159,7 +183,7 @@ HRESULT CAuthentikProvider::GetFieldDescriptorAt(
 
     HRESULT hr = E_INVALIDARG;
 
-    if (dwIndex < FID_NUM_FIELDS)
+    if (dwIndex < ARRAYSIZE(s_rgFieldDescriptors))
     {
         hr = FieldDescriptorCoAllocCopy(s_rgFieldDescriptors[dwIndex], ppcpfd);
     }
@@ -189,23 +213,24 @@ HRESULT CAuthentikProvider::GetCredentialAt(
 
     HRESULT hr = E_INVALIDARG;
 
-    if (dwIndex == 0 && ppcpc != NULL)
+    if (dwIndex == 0 && ppcpc != nullptr)
     {
-        if (_pCredential == NULL)
+        if (_pCredential == nullptr)
         {
             // Create the credential
             _pCredential = new(std::nothrow) CAuthentikCredential();
-            if (_pCredential != NULL)
+            if (_pCredential != nullptr)
             {
                 hr = _pCredential->Initialize(
                     _cpus,
                     s_rgFieldDescriptors,
-                    s_rgFieldStatePairs);
+                    s_rgFieldStatePairs,
+                    _ulAuthPackage);
 
                 if (FAILED(hr))
                 {
                     _pCredential->Release();
-                    _pCredential = NULL;
+                    _pCredential = nullptr;
                 }
             }
             else
@@ -214,7 +239,7 @@ HRESULT CAuthentikProvider::GetCredentialAt(
             }
         }
 
-        if (_pCredential != NULL)
+        if (_pCredential != nullptr)
         {
             hr = _pCredential->QueryInterface(IID_PPV_ARGS(ppcpc));
         }
@@ -227,8 +252,7 @@ HRESULT CAuthentikProvider::GetCredentialAt(
 HRESULT CAuthentikProvider::SetUserArray(ICredentialProviderUserArray* users)
 {
     LOG("CAuthentikProvider::SetUserArray");
-    UNREFERENCED_PARAMETER(users);
-    // We don't use the user array for passwordless
+    // We don't use the user array
     return S_OK;
 }
 
@@ -236,16 +260,16 @@ HRESULT CAuthentikProvider::SetUserArray(ICredentialProviderUserArray* users)
 HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
 {
     HRESULT hr = E_FAIL;
-    HANDLE hLsa = NULL;
+    HANDLE hLsa = nullptr;
     ULONG ulAuthPackage = 0;
     LSA_STRING packageName;
 
     // Connect to LSA
     NTSTATUS status = LsaConnectUntrusted(&hLsa);
-    if (status >= 0)
+    if (NT_SUCCESS(status))
     {
-        // Get "Kerberos" package for PKINIT
-        packageName.Buffer = (PCHAR)"Kerberos";
+        // Get "Negotiate" package
+        packageName.Buffer = (PCHAR)NEGOSSP_NAME_A;
         packageName.Length = (USHORT)strlen(packageName.Buffer);
         packageName.MaximumLength = packageName.Length;
 
@@ -254,36 +278,16 @@ HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
             &packageName,
             &ulAuthPackage);
 
-        if (status >= 0)
+        if (NT_SUCCESS(status))
         {
             _ulAuthPackage = ulAuthPackage;
             hr = S_OK;
-            LOG("Kerberos authentication package ID: %d", ulAuthPackage);
+            LOG("Authentication package ID: %d", ulAuthPackage);
         }
         else
         {
             LOG("LsaLookupAuthenticationPackage failed: 0x%08x", status);
-            
-            // Fallback to Negotiate
-            packageName.Buffer = (PCHAR)NEGOSSP_NAME_A;
-            packageName.Length = (USHORT)strlen(packageName.Buffer);
-            packageName.MaximumLength = packageName.Length;
-            
-            status = LsaLookupAuthenticationPackage(
-                hLsa,
-                &packageName,
-                &ulAuthPackage);
-            
-            if (status >= 0)
-            {
-                _ulAuthPackage = ulAuthPackage;
-                hr = S_OK;
-                LOG("Negotiate authentication package ID: %d", ulAuthPackage);
-            }
-            else
-            {
-                hr = HRESULT_FROM_NT(status);
-            }
+            hr = HRESULT_FROM_NT(status);
         }
 
         LsaDeregisterLogonProcess(hLsa);
