@@ -1,135 +1,249 @@
-# Authentik Credential Provider for Windows
+# Authentik Credential Provider for Windows - Passwordless Smart Card Edition
 
-A Windows Credential Provider that enables passwordless authentication using Authentik as the identity provider.
+A Windows Credential Provider that enables **true passwordless** domain authentication by integrating:
+- **Authentik** for user authentication and OTP validation
+- **Active Directory Certificate Services (AD CS)** for certificate issuance
+- **TPM Virtual Smart Cards (VSC)** for secure certificate storage
+- **Kerberos PKINIT** for domain authentication
 
-## Current Status: Research Phase
-
-**Important Discovery:** Windows PKINIT (certificate-based Kerberos authentication) requires a **smart card-compatible Key Storage Provider**. Software-based certificate storage does NOT work for domain logon, even with correctly structured KERB_CERTIFICATE_LOGON.
-
-### What Works
-- OTP authentication flow with Authentik API
-- Certificate issuance from Authentik/internal CA
-- Certificate storage in Windows certificate stores
-- TPM Virtual Smart Card creation and certificate enrollment
-
-### What Doesn't Work (Yet)
-- PKINIT with software-based KSP (Microsoft Software KSP, Passport KSP)
-- Direct KERB_CERTIFICATE_LOGON without smart card hardware/VSC
-
-## Recommended Approach
-
-Use **TPM Virtual Smart Card** for true PKINIT authentication. See [VSC-PKINIT-GUIDE.md](VSC-PKINIT-GUIDE.md) for complete instructions.
-
-## Architecture Options
-
-### Option 1: VSC + CSR-based Enrollment (Recommended)
-1. User authenticates with Authentik (OTP)
-2. Credential provider generates key on VSC
-3. CSR sent to Authentik for signing
-4. Certificate imported to VSC
-5. PKINIT logon with VSC
-
-### Option 2: Password Caching (Fallback)
-1. User authenticates with Authentik (OTP)
-2. Cached domain password used for Kerberos
-3. Less secure but simpler implementation
-
-### Option 3: AD FS Integration
-1. Configure AD FS with Authentik as claims provider
-2. Use existing smart card infrastructure
-3. Requires AD FS deployment
-
-## Building
-
-### Prerequisites
-- Visual Studio 2019 or later
-- Windows SDK
-- C++ Desktop Development workload
-
-### Build Steps
-1. Open `AuthentikCredentialProvider.sln` in Visual Studio
-2. Select Release/x64 configuration
-3. Build solution
-4. Copy DLL to `C:\Windows\System32\`
-5. Register with `regsvr32 AuthentikCredentialProvider.dll`
-
-## Configuration
-
-Edit `%PROGRAMDATA%\AuthentikCredentialProvider\config.json`:
-
-```json
-{
-  "authentik_url": "https://authentik.example.com",
-  "client_id": "your-client-id",
-  "flow_slug": "your-flow-slug"
-}
-```
-
-## Project Structure
+## 🎯 How It Works
 
 ```
-src/
-├── AuthentikCredentialProvider/
-│   ├── AuthentikCredential.cpp      # Main credential implementation
-│   ├── AuthentikProvider.cpp        # Provider registration
-│   ├── CertificateHelper.cpp        # Certificate operations
-│   ├── AuthentikAPI.cpp             # Authentik API client
-│   └── ...
-├── AuthentikKSP/                    # Custom KSP (experimental)
-└── Shared/                          # Shared utilities
+┌─────────────────┐                      ┌──────────────┐
+│   Windows       │  1. Username + OTP   │   Authentik  │
+│   Login Screen  │─────────────────────▶│   Server     │
+│                 │  2. OTP Validated    │              │
+│                 │◀─────────────────────│              │
+└────────┬────────┘                      └──────────────┘
+         │
+         │ 3. Request Certificate
+         ▼
+┌─────────────────┐                      ┌──────────────┐
+│   Certificate   │  4. Issue Cert       │   AD CS      │
+│   Issuer Svc    │─────────────────────▶│   (CA)       │
+│                 │  5. Certificate      │              │
+│                 │◀─────────────────────│              │
+└────────┬────────┘                      └──────────────┘
+         │
+         │ 6. Install to VSC
+         ▼
+┌─────────────────┐                      ┌──────────────┐
+│   TPM Virtual   │  7. PKINIT Auth      │   Domain     │
+│   Smart Card    │─────────────────────▶│   Controller │
+│                 │  8. TGT Issued       │              │
+│                 │◀─────────────────────│              │
+└─────────────────┘                      └──────────────┘
 ```
 
-## Key Files
+**User Experience:**
+1. Enter username
+2. Enter OTP (from authenticator app)
+3. Enter smart card PIN
+4. Logged in! (No password required)
 
-- `CertificateHelper.cpp` - Certificate import, CSP info building, PKINIT structures
-- `AuthentikCredential.cpp` - Logon flow, credential packaging
-- `VSC-PKINIT-GUIDE.md` - Complete guide for VSC-based authentication
+## 📋 Prerequisites
 
-## Technical Notes
+### Domain Environment
+- Windows Server 2016+ Domain Controller
+- Active Directory Certificate Services (AD CS) configured
+- Domain-joined workstations with TPM 2.0
 
-### Why Software KSP Fails for PKINIT
+### Software Requirements
+- Visual Studio 2019/2022 with C++ Desktop Development
+- Windows SDK 10.0.19041.0 or later
+- PowerShell 5.1+ with ActiveDirectory module
+- Authentik server (v2023.x or later)
 
-The Windows Kerberos SSP validates that certificates used for PKINIT come from smart card-compatible providers. When using KERB_CERTIFICATE_LOGON with software-based keys:
+### Certificate Template
+A properly configured certificate template with:
+- `CT_FLAG_SUBJECT_ALT_REQUIRE_UPN` flag (0x02000000)
+- Smart Card Logon EKU
+- Client Authentication EKU
 
-1. Kerberos SSP receives the logon request
-2. Checks the CSP/KSP provider type
-3. Rejects non-smart-card providers
-4. Falls back to password authentication (which fails with empty password)
+## 🚀 Quick Start
 
-Evidence in Kerberos debug logs:
+### 1. Configure Certificate Template
+
+On Domain Controller:
+```powershell
+# Configure template with UPN in SAN (required for PKINIT)
+.\tools\Configure-SmartCardTemplate.ps1 -TemplateName "AuthentikSmartcard"
 ```
-Error Code: 0x19 KDC_ERR_PREAUTH_REQUIRED
-Client Realm: (empty)
-Client Name: (empty)
+
+### 2. Start Certificate Issuer Service
+
+On DC or CA server:
+```powershell
+# Start the REST API that issues certificates
+.\tools\cert-issuer\CertIssuerService.ps1 `
+    -Port 8443 `
+    -ApiToken "YOUR-SECRET-TOKEN" `
+    -CAConfig "DC.domain.local\CA-Name" `
+    -CertTemplate "AuthentikSmartcard" `
+    -AllowHttp
 ```
 
-Empty client realm/name indicates PKINIT was not attempted.
+### 3. Create Virtual Smart Card on Workstation
 
-### Certificate Requirements for Smart Card Logon
+From Proxmox/physical console (NOT RDP):
+```powershell
+tpmvscmgr create /name "Authentik VSC" /pin PROMPT /adminkey random /generate
+# Enter PIN: 12345678
+```
 
-1. **EKUs:**
-   - Smart Card Logon (1.3.6.1.4.1.311.20.2.2)
-   - Client Authentication (1.3.6.1.5.5.7.3.2)
+### 4. Build and Install Credential Provider
 
-2. **Subject Alternative Name:**
-   - Must contain UPN matching AD user's userPrincipalName
-   - Format: `shop@test.local`
+```powershell
+# Build (from Visual Studio or MSBuild)
+msbuild AuthentikCredentialProvider.vcxproj /p:Configuration=Release /p:Platform=x64
 
-3. **Key Storage:**
-   - Must be on smart card or TPM Virtual Smart Card
-   - Private key never exportable
+# Install
+copy x64\Release\AuthentikCredentialProvider.dll C:\Windows\System32\
+regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
+```
 
-4. **Trust Chain:**
-   - CA must be in NTAuth store
-   - DC must have valid KDC certificate
+### 5. Configure Registry
 
-## Contributing
+```powershell
+# Create configuration
+New-Item -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Force
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "ServerUrl" -Value "authentik.domain.local"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "ServerPort" -Value 443 -Type DWord
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "FlowSlug" -Value "windows-smartcard-auth"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "UseHttps" -Value 1 -Type DWord
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "CertIssuerUrl" -Value "dc.domain.local"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "CertIssuerPort" -Value 8443 -Type DWord
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "CertIssuerToken" -Value "YOUR-SECRET-TOKEN"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "Domain" -Value "domain.local"
+Set-ItemProperty -Path "HKLM:\SOFTWARE\AuthentikCredentialProvider" -Name "UPNSuffix" -Value "@domain.local"
+```
 
-This is an experimental project. Contributions welcome, especially:
-- VSC integration code
-- CSR generation on smart card
-- Authentik CSR signing endpoint
+### 6. Reboot and Test
 
-## License
+```powershell
+shutdown /r /t 0
+```
 
-MIT License
+## 📁 Project Structure
+
+```
+authentik-credential-provider/
+├── src/                          # Source code
+│   ├── AuthentikAPI.cpp/h        # Authentik + Cert API client
+│   ├── AuthentikCredential.cpp/h # Credential tile (passwordless flow)
+│   ├── AuthentikCredentialProvider.cpp/h  # Main provider
+│   ├── SmartCardHelper.cpp/h     # VSC operations
+│   ├── CredentialPacking.cpp/h   # Kerberos credential packing
+│   ├── FieldDescriptors.h        # UI field definitions
+│   ├── Dll.cpp                   # DLL entry and COM registration
+│   ├── Logger.h                  # Debug logging
+│   └── guid.h                    # Provider GUID
+├── tools/
+│   ├── cert-issuer/
+│   │   └── CertIssuerService.ps1 # Certificate issuer REST API
+│   ├── Configure-SmartCardTemplate.ps1  # Template setup
+│   ├── Enroll-SmartCardCertificate.ps1  # Manual cert enrollment
+│   └── Diagnose-SmartCardAuth.ps1       # Troubleshooting
+├── docs/
+│   └── PKINIT_SMARTCARD_GUIDE.md # Detailed PKINIT guide
+├── KNOWLEDGE_BASE.md             # Complete project knowledge
+├── QUICKSTART.md                 # Quick setup guide
+└── README.md                     # This file
+```
+
+## 🔧 Configuration Reference
+
+### Registry Settings
+
+| Key | Type | Description | Example |
+|-----|------|-------------|---------|
+| ServerUrl | REG_SZ | Authentik server hostname | `authentik.domain.local` |
+| ServerPort | REG_DWORD | Authentik server port | `443` |
+| FlowSlug | REG_SZ | Authentik flow slug | `windows-smartcard-auth` |
+| UseHttps | REG_DWORD | Use HTTPS (1) or HTTP (0) | `1` |
+| CertIssuerUrl | REG_SZ | Certificate issuer hostname | `dc.domain.local` |
+| CertIssuerPort | REG_DWORD | Certificate issuer port | `8443` |
+| CertIssuerToken | REG_SZ | API authentication token | `secret-token` |
+| Domain | REG_SZ | AD domain name | `domain.local` |
+| UPNSuffix | REG_SZ | UPN suffix for users | `@domain.local` |
+
+### Certificate Template Requirements
+
+| Setting | Value |
+|---------|-------|
+| msPKI-Certificate-Name-Flag | `0x62000000` |
+| Key Usage | Digital Signature, Key Encipherment |
+| Enhanced Key Usage | Smart Card Logon, Client Authentication |
+| Subject Name | Build from AD (CN) |
+| Subject Alternative Name | UPN from AD (CRITICAL!) |
+
+## 🔍 Troubleshooting
+
+### Run Diagnostics
+
+```powershell
+# On workstation
+.\tools\Diagnose-SmartCardAuth.ps1 -Target Workstation -Username shop
+
+# On DC
+.\tools\Diagnose-SmartCardAuth.ps1 -Target DC -Username shop
+```
+
+### Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| "Certificate mapping failed" (Event 39) | No UPN in SAN | Reconfigure template with UPN flag |
+| "Credentials could not be verified" | Multiple certs on VSC | Recreate VSC with single cert |
+| tpmvscmgr fails | Running over RDP | Use physical/Proxmox console |
+| Certificate not issued | Template permissions | Grant Enroll to Authenticated Users |
+
+### Enable Debug Logging
+
+1. Build Debug configuration
+2. Run DebugView as Administrator
+3. Filter for `[AuthentikCP]` messages
+
+## 🔒 Security Considerations
+
+### Production Checklist
+
+- [ ] Enable SSL certificate validation (remove ignore flags)
+- [ ] Use strong API token for certificate issuer
+- [ ] Implement certificate pinning
+- [ ] Enable StrongCertificateBindingEnforcement on DC
+- [ ] Code sign the credential provider DLL
+- [ ] Restrict certificate template permissions
+- [ ] Implement certificate lifecycle management
+- [ ] Monitor for Event 39 errors on DC
+
+### Key Security Features
+
+- **No passwords transmitted** - OTP + certificate-based auth
+- **TPM-protected keys** - Private keys never leave VSC
+- **Short-lived certificates** - Optionally issue per-session certs
+- **Kerberos PKINIT** - Industry-standard protocol
+
+## 📚 Additional Documentation
+
+- [PKINIT Smart Card Guide](docs/PKINIT_SMARTCARD_GUIDE.md) - Detailed implementation guide
+- [Knowledge Base](KNOWLEDGE_BASE.md) - Complete project knowledge
+- [Quick Start](QUICKSTART.md) - Fast setup instructions
+
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## 📄 License
+
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+
+## 🙏 Acknowledgments
+
+- Microsoft Credential Provider samples
+- Authentik project
+- PrivacyIDEA credential provider (inspiration)
+
+---
+
+**Status:** ✅ PKINIT Smart Card Login Working (November 30, 2025)
