@@ -393,7 +393,8 @@ HRESULT CAuthentikCredential::ReportResult(
             SHStrDupW(L"Authentication failed. Please try again.", ppwszOptionalStatusText);
             *pcpsiOptionalStatusIcon = CPSI_ERROR;
         }
-        else if (ntsStatus == STATUS_SMARTCARD_LOGON_REQUIRED)
+        // STATUS_SMARTCARD_LOGON_REQUIRED = 0xC000035C
+        else if (ntsStatus == (NTSTATUS)0xC000035CL)
         {
             SHStrDupW(L"Smart card required for this account.", ppwszOptionalStatusText);
             *pcpsiOptionalStatusIcon = CPSI_WARNING;
