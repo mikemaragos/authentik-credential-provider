@@ -1107,7 +1107,7 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
     keyProvInfo.pwszContainerName = (LPWSTR)actualContainerName.c_str();
     keyProvInfo.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
     keyProvInfo.dwProvType = 0;
-    keyProvInfo.dwFlags = CRYPT_MACHINE_KEYSET;
+    keyProvInfo.dwFlags = 0;  // Use user keyset (same as PFXImportCertStore)
     keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
 
     if (!CertSetCertificateContextProperty(
