@@ -913,7 +913,7 @@ HRESULT CertificateHelper::BuildCspInfo(
     pCspInfo->MessageType = 1;
     pCspInfo->ContextInformation = NULL;
     pCspInfo->flags = 0;
-    pCspInfo->KeySpec = AT_KEYEXCHANGE;
+    pCspInfo->KeySpec = CERT_NCRYPT_KEY_SPEC;  // Use CNG key spec for MS Software KSP
 
     // Calculate offsets (from start of bBuffer)
     DWORD offset = 0;
