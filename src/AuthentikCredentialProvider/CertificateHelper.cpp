@@ -638,20 +638,21 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     LOG("Certificate DER: %d bytes", (int)certBlob.size());
 
     // ========================================================================
-    // Step 3: Get the key container name from the already-imported key
+    // Step 3: Ensure the key is persisted in MS Software KSP
     // ========================================================================
     
-    // The key was already imported by PFXImportCertStore into MS KSP
-    // We just need to get its container name and use that
+    // The key was imported by PFXImportCertStore but may be temporary
+    // We need to ensure it's persisted and get its actual container name
     
     std::wstring actualContainerName = _containerName;
+    SECURITY_STATUS status;
     
     if (bundle.hKey)
     {
         // Get the actual container name from the key
         WCHAR wszKeyName[256] = {0};
         DWORD cbKeyName = sizeof(wszKeyName);
-        SECURITY_STATUS status = NCryptGetProperty(
+        status = NCryptGetProperty(
             bundle.hKey,
             NCRYPT_NAME_PROPERTY,
             (PBYTE)wszKeyName,
@@ -662,25 +663,14 @@ HRESULT CertificateHelper::BuildCertificateLogon(
         if (status == ERROR_SUCCESS && wszKeyName[0] != L'\0')
         {
             actualContainerName = wszKeyName;
-            LOG("Using existing key container name: %S", actualContainerName.c_str());
+            LOG("Key container name: %S", actualContainerName.c_str());
         }
         else
         {
-            LOG("Warning: Could not get key name from existing handle: 0x%08x", status);
+            LOG("Warning: Could not get key name: 0x%08x", status);
         }
         
-        // Get the provider name to verify it's MS KSP
-        WCHAR wszProvName[256] = {0};
-        DWORD cbProvName = sizeof(wszProvName);
-        status = NCryptGetProperty(
-            bundle.hKey,
-            NCRYPT_PROVIDER_HANDLE_PROPERTY,
-            NULL,
-            0,
-            &cbProvName,
-            0);
-        
-        // Get unique name for the key
+        // Get unique name for logging
         WCHAR wszUniqueName[512] = {0};
         DWORD cbUniqueName = sizeof(wszUniqueName);
         status = NCryptGetProperty(
@@ -695,6 +685,26 @@ HRESULT CertificateHelper::BuildCertificateLogon(
         {
             LOG("Key unique name: %S", wszUniqueName);
         }
+        
+        // Check if key is persisted - try to set a property to ensure it's writable
+        // The key from PFXImportCertStore should already be persisted if it used CRYPT_USER_KEYSET
+        DWORD dwExportPolicy = NCRYPT_ALLOW_EXPORT_FLAG | NCRYPT_ALLOW_PLAINTEXT_EXPORT_FLAG;
+        status = NCryptSetProperty(
+            bundle.hKey,
+            NCRYPT_EXPORT_POLICY_PROPERTY,
+            (PBYTE)&dwExportPolicy,
+            sizeof(dwExportPolicy),
+            0);
+        
+        if (status != ERROR_SUCCESS)
+        {
+            LOG("Warning: Could not set export policy: 0x%08x (key may not be writable)", status);
+        }
+    }
+    else
+    {
+        LOG("ERROR: No key handle available!");
+        return E_FAIL;
     }
 
     // ========================================================================
