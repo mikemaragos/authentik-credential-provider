@@ -1177,7 +1177,7 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
 
     CRYPT_KEY_PROV_INFO keyProvInfo = {0};
     keyProvInfo.pwszContainerName = (LPWSTR)actualContainerName.c_str();
-    keyProvInfo.pwszProvName = L"Microsoft Passport Key Storage Provider";
+    keyProvInfo.pwszProvName = (LPWSTR)L"Microsoft Passport Key Storage Provider";
     keyProvInfo.dwProvType = 0;
     keyProvInfo.dwFlags = CRYPT_MACHINE_KEYSET;  // Must match PFXImportCertStore
     keyProvInfo.dwKeySpec = CERT_NCRYPT_KEY_SPEC;  // CNG key spec for Passport KSP
