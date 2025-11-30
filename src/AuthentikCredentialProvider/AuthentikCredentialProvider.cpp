@@ -81,7 +81,7 @@ HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
     HANDLE hLsa = nullptr;
     
     NTSTATUS status = LsaConnectUntrusted(&hLsa);
-    if (status == STATUS_SUCCESS)
+    if (NT_SUCCESS(status))
     {
         LSA_STRING lsaszPackageName;
         lsaszPackageName.Buffer = (PCHAR)"Negotiate";
@@ -89,7 +89,7 @@ HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
         lsaszPackageName.MaximumLength = lsaszPackageName.Length + 1;
 
         status = LsaLookupAuthenticationPackage(hLsa, &lsaszPackageName, &_ulAuthPackage);
-        if (status != STATUS_SUCCESS)
+        if (!NT_SUCCESS(status))
         {
             LOG("LsaLookupAuthenticationPackage failed");
             hr = HRESULT_FROM_NT(status);
