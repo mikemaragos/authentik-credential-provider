@@ -638,55 +638,64 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     LOG("Certificate DER: %d bytes", (int)certBlob.size());
 
     // ========================================================================
-    // Step 3: Import private key into MS Software KSP
+    // Step 3: Get the key container name from the already-imported key
     // ========================================================================
-
-    NCRYPT_PROV_HANDLE hProvider = 0;
-    NCRYPT_KEY_HANDLE hImportedKey = 0;
-    SECURITY_STATUS status;
-
-    // Open MS Software KSP
-    status = NCryptOpenStorageProvider(&hProvider, MS_KEY_STORAGE_PROVIDER, 0);
-    if (status != ERROR_SUCCESS)
+    
+    // The key was already imported by PFXImportCertStore into MS KSP
+    // We just need to get its container name and use that
+    
+    std::wstring actualContainerName = _containerName;
+    
+    if (bundle.hKey)
     {
-        LOG("Failed to open MS KSP: 0x%08x", status);
-        return HRESULT_FROM_WIN32(status);
+        // Get the actual container name from the key
+        WCHAR wszKeyName[256] = {0};
+        DWORD cbKeyName = sizeof(wszKeyName);
+        SECURITY_STATUS status = NCryptGetProperty(
+            bundle.hKey,
+            NCRYPT_NAME_PROPERTY,
+            (PBYTE)wszKeyName,
+            cbKeyName,
+            &cbKeyName,
+            0);
+        
+        if (status == ERROR_SUCCESS && wszKeyName[0] != L'\0')
+        {
+            actualContainerName = wszKeyName;
+            LOG("Using existing key container name: %S", actualContainerName.c_str());
+        }
+        else
+        {
+            LOG("Warning: Could not get key name from existing handle: 0x%08x", status);
+        }
+        
+        // Get the provider name to verify it's MS KSP
+        WCHAR wszProvName[256] = {0};
+        DWORD cbProvName = sizeof(wszProvName);
+        status = NCryptGetProperty(
+            bundle.hKey,
+            NCRYPT_PROVIDER_HANDLE_PROPERTY,
+            NULL,
+            0,
+            &cbProvName,
+            0);
+        
+        // Get unique name for the key
+        WCHAR wszUniqueName[512] = {0};
+        DWORD cbUniqueName = sizeof(wszUniqueName);
+        status = NCryptGetProperty(
+            bundle.hKey,
+            NCRYPT_UNIQUE_NAME_PROPERTY,
+            (PBYTE)wszUniqueName,
+            cbUniqueName,
+            &cbUniqueName,
+            0);
+            
+        if (status == ERROR_SUCCESS && wszUniqueName[0] != L'\0')
+        {
+            LOG("Key unique name: %S", wszUniqueName);
+        }
     }
-
-    // Build parameter list with key name
-    NCryptBuffer keyNameBuffer = {0};
-    keyNameBuffer.cbBuffer = (DWORD)((_containerName.length() + 1) * sizeof(WCHAR));
-    keyNameBuffer.BufferType = NCRYPTBUFFER_PKCS_KEY_NAME;
-    keyNameBuffer.pvBuffer = (PVOID)_containerName.c_str();
-
-    NCryptBufferDesc paramList = {0};
-    paramList.ulVersion = NCRYPTBUFFER_VERSION;
-    paramList.cBuffers = 1;
-    paramList.pBuffers = &keyNameBuffer;
-
-    // Import the private key with name
-    status = NCryptImportKey(
-        hProvider,
-        0,
-        BCRYPT_RSAPRIVATE_BLOB,
-        &paramList,
-        &hImportedKey,
-        privateKeyBlob.data(),
-        (DWORD)privateKeyBlob.size(),
-        NCRYPT_OVERWRITE_KEY_FLAG);
-
-    if (status != ERROR_SUCCESS)
-    {
-        LOG("NCryptImportKey failed: 0x%08x", status);
-        NCryptFreeObject(hProvider);
-        return HRESULT_FROM_WIN32(status);
-    }
-
-    LOG("Private key imported to MS KSP with container: %S", _containerName.c_str());
-
-    // Close handles (key persists in KSP)
-    NCryptFreeObject(hImportedKey);
-    NCryptFreeObject(hProvider);
 
     // ========================================================================
     // Step 4: Build CSP Info structure
@@ -696,7 +705,7 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     DWORD cbCspInfo = 0;
 
     hr = BuildCspInfo(
-        _containerName,
+        actualContainerName,
         MS_KEY_STORAGE_PROVIDER,  // Use MS KSP
         &pCspInfo,
         &cbCspInfo);
