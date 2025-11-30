@@ -15,6 +15,11 @@
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "secur32.lib")
 
+// NT_SUCCESS macro if not defined
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+
 // DLL reference counting
 extern void DllAddRef();
 extern void DllRelease();
