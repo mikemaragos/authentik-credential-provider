@@ -1,201 +1,252 @@
-# Authentik Credential Provider - Knowledge Base
+# Windows Credential Provider with OTP Authentication - Complete Knowledge Base
 
-## Project Goal
-Enable passwordless Windows domain authentication using Authentik as the identity provider.
+## Document Purpose
 
-## Critical Discovery (November 2025)
+This document captures ALL knowledge, decisions, challenges, solutions, and technical details from the Authentik/PrivacyIDEA Windows Credential Provider OTP authentication project. Use this as the single source of truth when starting a new project or resuming this one.
 
-### Software KSP Does NOT Work for PKINIT
+**Last Updated:** November 30, 2025  
+**Project Status:** ✅ PKINIT Smart Card Authentication WORKING  
+**Current Implementation:** True passwordless authentication via TPM Virtual Smart Card
 
-**This is the most important finding of the project.**
+---
 
-Windows PKINIT (certificate-based Kerberos authentication via `KERB_CERTIFICATE_LOGON`) requires a **smart card-compatible Key Storage Provider**. The following approaches were tested and **DO NOT WORK**:
+## 🎉 MAJOR MILESTONE: PKINIT Smart Card Login Working!
 
-| Approach | Result | Why |
-|----------|--------|-----|
-| Microsoft Software KSP | ❌ FAILS | Not recognized as smart card |
-| Microsoft Passport KSP | ❌ FAILS | Requires WHfB enrollment |
-| Custom KSP (AuthentikKSP) | ❌ FAILS | Not smart card compatible |
-| TPM Virtual Smart Card | ✅ WORKS | Emulates real smart card |
+As of November 30, 2025, we have achieved true passwordless Windows domain authentication using:
+- TPM Virtual Smart Card (VSC)
+- Certificate-based PKINIT authentication
+- No password required for domain logon
 
-**Evidence:** When using software-based KSPs, Kerberos debug logs show:
+**See [PKINIT_SMARTCARD_GUIDE.md](PKINIT_SMARTCARD_GUIDE.md) for complete implementation details.**
+
+---
+
+## Key Project Information
+
+### Critical Success Factors
+
+#### For OTP-based Authentication (Original Implementation)
+1. **Credential Packing**: MUST use CoTaskMemAlloc for COM compatibility
+2. **UNICODE_STRING**: Length is in BYTES (multiply by sizeof(WCHAR))
+3. **State Management**: Two-step flow requires careful state tracking
+4. **Debug Logging**: Essential for troubleshooting credential providers
+5. **Windows Password**: Required for Kerberos - no true passwordless without certificates
+
+#### For PKINIT Smart Card Authentication (NEW - Working!)
+1. **UPN in SAN**: Certificate MUST have User Principal Name in Subject Alternative Name extension
+2. **Single Certificate**: Only ONE certificate should exist on VSC to avoid selection issues
+3. **Template Flag**: `CT_FLAG_SUBJECT_ALT_REQUIRE_UPN` (0x02000000) is CRITICAL
+4. **VSC Recreation**: Destroy and recreate VSC when changing certificates
+5. **KB5014754 Compliance**: Strong certificate mapping requires UPN in SAN
+
+### Architecture Overview
+
+#### OTP Authentication Flow
+- **Client**: Windows Credential Provider DLL (C++/COM)
+- **Server**: Authentik (Python/Django) with LDAP backend
+- **Domain**: Active Directory for user management and Kerberos
+
+#### PKINIT Smart Card Flow (Recommended)
 ```
-Error Code: 0x19 KDC_ERR_PREAUTH_REQUIRED
-Client Realm: (empty)
-Client Name: (empty)
+User → PIN → TPM VSC → Certificate → KDC (PKINIT) → TGT → Domain Logon
 ```
-Empty Client Realm/Name indicates the Kerberos SSP rejected the certificate **before** attempting PKINIT.
+No password transmitted or required!
 
-### Solution: TPM Virtual Smart Card
+### Authentication Flows
 
-The only working approach for software-based PKINIT is using a **TPM Virtual Smart Card**:
+#### Flow 1: OTP Authentication (Original)
+1. User enters username + password
+2. Credential Provider validates with Authentik
+3. Authentik triggers OTP challenge
+4. User enters OTP
+5. Authentik validates OTP
+6. Credential Provider packs username + password
+7. Windows performs Kerberos authentication
+8. User logged in
 
-1. TPM generates and protects the private key
-2. Windows recognizes VSC as a legitimate smart card
-3. Kerberos SSP accepts certificates from VSC for PKINIT
-4. Full domain authentication works
+#### Flow 2: PKINIT Smart Card (NEW - Recommended)
+1. User selects smart card login
+2. User enters smart card PIN
+3. TPM VSC provides certificate and signs challenge
+4. Windows sends PKINIT AS-REQ to KDC
+5. KDC validates certificate and maps to AD user
+6. KDC issues TGT
+7. User logged in (NO PASSWORD!)
 
-See [VSC-PKINIT-GUIDE.md](VSC-PKINIT-GUIDE.md) for complete setup instructions.
+### Critical Files
 
-## Certificate Requirements for Smart Card Logon
+#### Credential Provider (OTP)
+- **CredentialPacking.cpp** - KERB_INTERACTIVE_LOGON serialization
+- **AuthentikCredential.cpp** - Two-step authentication logic
+- **AuthentikAPI.cpp** - HTTP communication with Authentik
+- **Dll.cpp** - COM registration and class factory
 
-### Required EKUs
-- Smart Card Logon: `1.3.6.1.4.1.311.20.2.2`
-- Client Authentication: `1.3.6.1.5.5.7.3.2`
+#### PowerShell Tools (PKINIT)
+- **tools/Configure-SmartCardTemplate.ps1** - Certificate template configuration
+- **tools/Enroll-SmartCardCertificate.ps1** - VSC certificate enrollment
+- **tools/Diagnose-SmartCardAuth.ps1** - Troubleshooting diagnostics
 
-### Required Subject Alternative Name
-**CRITICAL:** Certificate MUST contain UPN in SAN matching AD user's userPrincipalName:
-```
-2.5.29.17 = "{text}"
-_continue_ = "upn=username@domain.local"
-```
+### Working Configurations
 
-Without the UPN SAN, Windows cannot map the certificate to an AD user account.
-
-### Certificate Chain
-- Issuing CA must be in the NTAuth store
-- Domain controller must have valid KDC Authentication certificate
-
-## Infrastructure Requirements
-
-### Domain Controller
-- Windows Server 2016+ (tested with 2019, 2022)
-- KDC certificate with KDC Authentication EKU (`1.3.6.1.5.2.3.5`)
-- Enterprise CA or standalone CA with NTAuth publication
-
-### Workstation
-- Windows 10/11 with TPM 1.2 or 2.0
-- TPM enabled and owned
-- Smart Card service (SCardSvr) running
-
-### Authentik
-- Flow configured for OTP authentication
-- Certificate provider (optional - can use Windows CA instead)
-
-## Architecture Options
-
-### Option 1: VSC with Windows CA (Tested, Works)
-```
-User → Credential Provider → OTP to Authentik → 
-  → Generate Key on VSC → CSR to Windows CA → 
-  → Certificate to VSC → PKINIT to DC
-```
-
-### Option 2: VSC with Authentik CA (To Be Implemented)
-```
-User → Credential Provider → OTP to Authentik → 
-  → Generate Key on VSC → CSR to Authentik → 
-  → Certificate to VSC → PKINIT to DC
-```
-
-### Option 3: Password Caching (Fallback)
-```
-User → Credential Provider → OTP to Authentik → 
-  → Cached Password → Password-based Kerberos
-```
-
-## Code Status
-
-### Working Components
-- `AuthentikAPI.cpp` - API communication with Authentik
-- `AuthentikCredential.cpp` - Credential provider UI and flow
-- `AuthentikProvider.cpp` - Provider registration
-
-### Obsolete/Non-Working Components
-- `CertificateHelper.cpp` software KSP code - Does not work for PKINIT
-- `AuthentikKSP/` - Custom KSP project - Does not work for PKINIT
-
-The software KSP code is preserved for reference but should not be used for production.
-
-### Needed Components
-- VSC key generation code
-- CSR creation from VSC key
-- Certificate import to VSC
-- Smart card PIN handling
-
-## Testing Environment
-
-### Domain
-- Domain: `test.local`
-- DC: `WIN-6DP39D0OLI8.test.local` (Windows Server)
-- CA: `test-WIN-6DP39D0OLI8-CA`
-
-### Workstation
-- Name: `TEST10`
-- OS: Windows 10/11
-- TPM: IBM (in Proxmox VM with vTPM)
-
-### User
-- Username: `shop`
-- UPN: `shop@test.local`
-
-## Useful Commands
-
-### TPM Virtual Smart Card
-```powershell
-# Create VSC (must be from console, not RDP)
-tpmvscmgr.exe create /name "Authentik VSC" /pin PROMPT /adminkey random /generate
-
-# Check VSC status
-certutil -scinfo
-
-# Start smart card service
-Start-Service SCardSvr
+#### OTP Configuration
+```registry
+HKLM\SOFTWARE\AuthentikCredentialProvider
+ServerUrl = "authentik.test.local"
+ServerPort = 443 (DWORD)
+FlowSlug = "windows-otp-auth"
+UseHttps = 1 (DWORD)
 ```
 
-### Certificate Operations
-```powershell
-# Generate CSR on VSC
-certreq -new request.inf request.csr
+#### PKINIT Configuration
+| Setting | Value |
+|---------|-------|
+| Template Name | AuthentikSmartcard |
+| msPKI-Certificate-Name-Flag | 0x62000000 |
+| Certificate Subject | E=user@domain, CN=user |
+| Certificate SAN | Principal Name=user@domain |
+| VSC Provider | Microsoft Base Smart Card Crypto Provider |
+| Key Length | 2048 |
+| EKUs | Smart Card Logon, Client Authentication |
 
-# Submit to CA
-certreq -submit -attrib "CertificateTemplate:SmartcardLogon" -config "SERVER\CA" request.csr cert.cer
+### Common Issues & Solutions
 
-# Accept certificate
-certreq -accept cert.cer
+#### OTP Issues
 
-# View certificate store
-certutil -store MY
-```
+**Issue: LNK2019 errors**
+- Solution: Add Secur32.lib;Advapi32.lib;Shlwapi.lib;Winhttp.lib
 
-### Kerberos Debugging
-```powershell
-# Enable Kerberos logging
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters" /v LogLevel /t REG_DWORD /d 1 /f
+**Issue: Credential provider doesn't appear**
+- Solution: Reboot after registration, check registry, verify x64 architecture
 
-# Check Kerberos events
-Get-WinEvent -LogName "System" | Where-Object { $_.ProviderName -like "*Kerb*" }
+**Issue: LogonUI crashes**
+- Solution: Validate KERB_INTERACTIVE_LOGON structure, check memory alignment
 
-# Check authentication events on DC
-Get-WinEvent -LogName "Security" | Where-Object { $_.Id -eq 4768 -or $_.Id -eq 4771 }
-```
+**Issue: SSL errors**
+- Solution: Use valid certificate OR import self-signed cert to Trusted Root
 
-## Session History
+#### PKINIT Issues
 
-### November 29, 2025 - Major Breakthrough
-1. Discovered software KSP limitation
-2. Created TPM Virtual Smart Card
-3. Generated key on VSC
-4. Got certificate from CA
-5. Smart card login screen appeared
-6. Found missing UPN in SAN issue
+**Issue: Event 39 "Certificate could not be mapped to user"**
+- Cause: Certificate doesn't have UPN in Subject Alternative Name
+- Solution: Configure template with `CT_FLAG_SUBJECT_ALT_REQUIRE_UPN` flag
 
-### Previous Sessions
-- KERB_CERTIFICATE_LOGON structure implementation
-- Certificate import to software stores
-- Custom KSP development
-- Various debugging attempts
+**Issue: Kerberos 0x19 with empty Client Realm/Name**
+- Cause: Certificate not on smart card provider, PKINIT not being used
+- Solution: Ensure certificate is on VSC, not software KSP
 
-## References
+**Issue: "Credentials could not be verified" after PIN accepted**
+- Cause: Multiple certificates on VSC, KDC selecting wrong one
+- Solution: Destroy VSC and recreate with single certificate
 
-- [VSC-PKINIT-GUIDE.md](VSC-PKINIT-GUIDE.md) - Complete VSC setup guide
-- [Microsoft Virtual Smart Card Overview](https://learn.microsoft.com/en-us/windows/security/identity-protection/virtual-smart-cards/virtual-smart-card-overview)
-- [PKINIT RFC 4556](https://datatracker.ietf.org/doc/html/rfc4556)
-- [TPM Protected Certificates](https://learn.microsoft.com/en-us/archive/blogs/pki/setting-up-tpm-protected-certificates-using-a-microsoft-certificate-authority-part-2-virtual-smart-cards)
+**Issue: "The parameter is incorrect" after "Welcome" flash**
+- Cause: Authentication succeeded but logon session failed
+- Solution: Check for profile issues, verify single certificate
 
-## Next Steps
+**Issue: tpmvscmgr fails over RDP**
+- Cause: Terminal Services restriction
+- Solution: Run from physical console or Proxmox VM console
 
-1. **Complete VSC certificate with UPN** - Add SAN to CSR and re-issue
-2. **Test smart card logon** - Verify PKINIT works with correct certificate
-3. **Integrate VSC operations into credential provider** - Programmatic VSC key generation
-4. **Add Authentik CSR signing** - Allow Authentik to sign VSC-generated CSRs
+### Security Checklist
+
+#### OTP Implementation
+- [ ] Enable SSL certificate validation in production
+- [ ] Remove SECURITY_FLAG_IGNORE_* flags
+- [ ] Use SecureZeroMemory for password cleanup
+- [ ] Implement certificate pinning
+- [ ] Set proper file/registry ACLs
+- [ ] Code sign the DLL
+- [ ] Encrypt API tokens with DPAPI
+
+#### PKINIT Implementation
+- [x] Certificate has UPN in SAN
+- [x] Template uses AD-sourced subject information
+- [x] Single certificate on VSC
+- [x] Strong certificate mapping enabled (KB5014754)
+- [ ] Consider altSecurityIdentities for explicit mapping
+- [ ] Implement certificate lifecycle management
+- [ ] Plan for certificate renewal automation
+
+### Future Enhancements Priority
+
+1. ~~Certificate-based authentication (PKINIT) - True passwordless~~ ✅ DONE!
+2. **Authentik Integration** - API to request certificates from AD CS
+3. **Auto-enrollment** - Automatic VSC provisioning via Authentik
+4. Offline authentication support - Pre-fetched OTP codes
+5. Proper JSON parsing library - Replace string matching
+6. Enhanced logging - Windows Event Log integration
+7. Biometric integration - Windows Hello support
+
+### Testing Procedure
+
+#### OTP Testing
+1. Build: `msbuild /p:Configuration=Release /p:Platform=x64`
+2. Copy: `copy AuthentikCredentialProvider.dll C:\Windows\System32\`
+3. Register: `regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll`
+4. Configure registry settings
+5. Reboot
+6. Test with DebugView running
+7. Verify in Event Viewer
+
+#### PKINIT Testing
+1. Configure template: `.\Configure-SmartCardTemplate.ps1`
+2. Create VSC (from console): `tpmvscmgr create /name "VSC" /pin PROMPT /adminkey random /generate`
+3. Enroll certificate: `.\Enroll-SmartCardCertificate.ps1 -Username shop -CAConfig "DC\CA"`
+4. Lock workstation: Win+L
+5. Select smart card, enter PIN
+6. If fails, run: `.\Diagnose-SmartCardAuth.ps1 -Target Both`
+
+### Deployment Options
+- Manual: Copy + regsvr32 (OTP) or PowerShell scripts (PKINIT)
+- Group Policy: MSI deployment via GPO
+- PowerShell: Deploy-AuthentikCP.ps1 script
+- SCCM/Intune: Application deployment
+- **Authentik Integration**: Future auto-provisioning
+
+### Critical Lessons Learned
+
+#### General
+1. Always use CoTaskMemAlloc for COM interfaces
+2. Windows caches credential providers - reboot after changes
+3. DebugView is essential for troubleshooting
+4. Start simple then enhance
+5. Study reference implementations before writing code
+6. Build security in from the start
+7. Test on real hardware, not just VMs
+8. Keep recovery plan (Safe Mode access)
+9. Document everything - future you will thank present you
+
+#### PKINIT Specific
+10. **UPN in SAN is mandatory** - KB5014754 requires it for certificate mapping
+11. **Single certificate per VSC** - Multiple certs cause selection issues
+12. **Template flags matter** - `CT_FLAG_SUBJECT_ALT_REQUIRE_UPN` is critical
+13. **VSC operations require console** - RDP/Terminal Services blocks tpmvscmgr
+14. **Ghost certificates** - Reboot to clear cached entries
+15. **Event 39 is your friend** - Check DC System log for mapping failures
+
+### Test Environment Details
+
+| Component | Value |
+|-----------|-------|
+| Domain | test.local |
+| Domain Controller | WIN-6DP39D0OLI8.test.local |
+| Certificate Authority | test-WIN-6DP39D0OLI8-CA |
+| Workstation | TEST10 |
+| Test User | shop@test.local |
+| VSC PIN | 12345678 |
+
+### Resources
+- Microsoft: https://docs.microsoft.com/en-us/windows/win32/secauthn/credential-providers-in-windows
+- Authentik: https://goauthentik.io/docs/
+- PrivacyIDEA: https://github.com/privacyidea/privacyidea-credential-provider
+- Sample Code: https://github.com/Microsoft/Windows-classic-samples/tree/master/Samples/CredentialProvider
+- KB5014754: https://support.microsoft.com/en-us/topic/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers
+
+---
+
+For complete details on PKINIT implementation, see [PKINIT_SMARTCARD_GUIDE.md](PKINIT_SMARTCARD_GUIDE.md).
+
+**Document Version:** 2.0  
+**Last Updated:** November 30, 2025  
+**Status:** ✅ PKINIT Working
+
+This knowledge base ensures no knowledge is lost when resuming or restarting this project.
