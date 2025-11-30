@@ -611,10 +611,14 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
             // Store PFX data in cert bundle
             _certBundle.pfxBase64 = response.pfxBase64;
             _certBundle.pfxPassword = response.pfxPassword;
-            _certBundle.username = response.username;
-            _certBundle.domain = response.domain;
+            
+            // Use response username/domain if provided, otherwise use authenticated values
+            _certBundle.username = response.username.empty() ? _username : response.username;
+            _certBundle.domain = response.domain.empty() ? _domain : response.domain;
             _certBundle.upn = response.upn;
             _certBundle.validMinutes = response.certValidMinutes > 0 ? response.certValidMinutes : 60;
+            
+            LOG("Cert bundle: user=%S, domain=%S", _certBundle.username.c_str(), _certBundle.domain.c_str());
 
             // Build certificate credential
             return _PackCertificateCredential(pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
@@ -639,10 +643,12 @@ HRESULT CAuthentikCredential::_HandleOTPStep(
                     &_certBundle.privateKey[0], keySize, NULL, NULL);
             }
             
-            _certBundle.username = response.username;
-            _certBundle.domain = response.domain;
+            _certBundle.username = response.username.empty() ? _username : response.username;
+            _certBundle.domain = response.domain.empty() ? _domain : response.domain;
             _certBundle.upn = response.upn;
             _certBundle.validMinutes = response.certValidMinutes;
+            
+            LOG("Cert bundle (PEM): user=%S, domain=%S", _certBundle.username.c_str(), _certBundle.domain.c_str());
 
             // Build certificate credential
             return _PackCertificateCredential(pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
