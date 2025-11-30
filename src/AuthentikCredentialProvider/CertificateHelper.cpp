@@ -888,9 +888,9 @@ HRESULT CertificateHelper::BuildCspInfo(
     if (ppCspInfo == NULL || pcbCspInfo == NULL)
         return E_INVALIDARG;
 
-    // String values
-    std::wstring cardName = L"Authentik Virtual Card";
-    std::wstring readerName = L"Authentik Virtual Reader";
+    // For software-based certificates (no smart card), use empty card/reader names
+    std::wstring cardName = L"";
+    std::wstring readerName = L"";
 
     // Calculate buffer size
     DWORD cbCardName = (DWORD)((cardName.length() + 1) * sizeof(WCHAR));
