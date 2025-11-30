@@ -682,8 +682,8 @@ HRESULT CertificateHelper::BuildCertificateLogon(
 
     if (privateKeyBlob.empty())
     {
-        LOG("Failed to get private key blob");
-        return E_FAIL;
+        LOG("No exported private key blob - will rely on certificate's key link in store");
+        // This is OK for PKINIT - Kerberos can use the key via the cert store
     }
 
     // ========================================================================
