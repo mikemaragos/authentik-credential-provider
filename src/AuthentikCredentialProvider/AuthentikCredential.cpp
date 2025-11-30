@@ -10,8 +10,10 @@
 #define IDI_AUTHENTIK_ICON 101
 #include <shlwapi.h>
 #include <new>
+#include <ntsecapi.h>
 
 #pragma comment(lib, "Shlwapi.lib")
+#pragma comment(lib, "Secur32.lib")
 
 // External DLL instance
 extern HINSTANCE g_hinst;
@@ -733,8 +735,35 @@ HRESULT CAuthentikCredential::_PackCertificateCredential(
     pcpcs->rgbSerialization = pPackage;
     pcpcs->cbSerialization = cbPackage;
     
-    // Use Kerberos package for PKINIT
-    pcpcs->ulAuthenticationPackage = 0;
+    // Get Kerberos authentication package ID for PKINIT
+    HANDLE hLsa = NULL;
+    LSA_STRING packageName;
+    packageName.Buffer = (PCHAR)"Kerberos";
+    packageName.Length = (USHORT)strlen(packageName.Buffer);
+    packageName.MaximumLength = packageName.Length;
+    
+    NTSTATUS status = LsaConnectUntrusted(&hLsa);
+    if (status >= 0)
+    {
+        ULONG ulKerberos = 0;
+        status = LsaLookupAuthenticationPackage(hLsa, &packageName, &ulKerberos);
+        if (status >= 0)
+        {
+            pcpcs->ulAuthenticationPackage = ulKerberos;
+            LOG("Using Kerberos auth package: %d", ulKerberos);
+        }
+        else
+        {
+            LOG("LsaLookupAuthenticationPackage failed: 0x%08x, using package 0", status);
+            pcpcs->ulAuthenticationPackage = 0;
+        }
+        LsaDeregisterLogonProcess(hLsa);
+    }
+    else
+    {
+        LOG("LsaConnectUntrusted failed: 0x%08x, using package 0", status);
+        pcpcs->ulAuthenticationPackage = 0;
+    }
 
     *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
     *pcpsiOptionalStatusIcon = CPSI_SUCCESS;
