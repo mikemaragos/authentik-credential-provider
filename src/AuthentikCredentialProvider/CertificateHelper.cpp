@@ -773,9 +773,10 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     BYTE* pCspInfo = NULL;
     DWORD cbCspInfo = 0;
 
+    // Use Passport KSP which Windows treats as smart card-compatible
     hr = BuildCspInfo(
         actualContainerName,
-        MS_KEY_STORAGE_PROVIDER,  // Use MS KSP
+        L"Microsoft Passport Key Storage Provider",
         &pCspInfo,
         &cbCspInfo);
 
@@ -1017,13 +1018,23 @@ HRESULT CertificateHelper::ImportPrivateKey(
 {
     LOG("ImportPrivateKey: %d bytes", (int)keyDer.size());
 
-    // Open storage provider
+    // Open storage provider - use Passport KSP for WHfB compatibility
     if (_hProvider == 0)
     {
         SECURITY_STATUS status = NCryptOpenStorageProvider(
             &_hProvider,
-            MS_KEY_STORAGE_PROVIDER,  // Use MS KSP for import
+            L"Microsoft Passport Key Storage Provider",
             0);
+
+        if (status != ERROR_SUCCESS)
+        {
+            LOG("NCryptOpenStorageProvider (Passport) failed: 0x%08x, trying MS Software KSP", status);
+            // Fall back to MS Software KSP
+            status = NCryptOpenStorageProvider(
+                &_hProvider,
+                MS_KEY_STORAGE_PROVIDER,
+                0);
+        }
 
         if (status != ERROR_SUCCESS)
         {
@@ -1166,10 +1177,10 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
 
     CRYPT_KEY_PROV_INFO keyProvInfo = {0};
     keyProvInfo.pwszContainerName = (LPWSTR)actualContainerName.c_str();
-    keyProvInfo.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
+    keyProvInfo.pwszProvName = L"Microsoft Passport Key Storage Provider";
     keyProvInfo.dwProvType = 0;
     keyProvInfo.dwFlags = CRYPT_MACHINE_KEYSET;  // Must match PFXImportCertStore
-    keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
+    keyProvInfo.dwKeySpec = CERT_NCRYPT_KEY_SPEC;  // CNG key spec for Passport KSP
 
     if (!CertSetCertificateContextProperty(
         pCert,
