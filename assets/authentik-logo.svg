@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Authentik coral/orange gradient -->
+    <linearGradient id="authentikGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FF6B4A;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#FD4B2D;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Shadow filter -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="2" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="128" cy="128" r="120" fill="url(#authentikGradient)" filter="url(#shadow)"/>
+  
+  <!-- Authentik-style geometric "A" shape -->
+  <g transform="translate(128, 128)">
+    <!-- Main triangular "A" shape -->
+    <path d="M 0 -70 L 50 50 L 30 50 L 20 25 L -20 25 L -30 50 L -50 50 Z" 
+          fill="#FFFFFF" 
+          stroke="none"/>
+    
+    <!-- Inner triangle cutout (the hole in "A") -->
+    <path d="M 0 -30 L 12 10 L -12 10 Z" 
+          fill="url(#authentikGradient)"/>
+    
+    <!-- Key symbol integrated -->
+    <g transform="translate(0, 55)">
+      <!-- Key head (circle) -->
+      <circle cx="0" cy="0" r="15" fill="#FFFFFF" stroke="none"/>
+      <circle cx="0" cy="0" r="8" fill="url(#authentikGradient)"/>
+      
+      <!-- Key shaft -->
+      <rect x="-4" y="10" width="8" height="25" fill="#FFFFFF"/>
+      
+      <!-- Key teeth -->
+      <rect x="4" y="20" width="8" height="4" fill="#FFFFFF"/>
+      <rect x="4" y="28" width="6" height="4" fill="#FFFFFF"/>
+    </g>
+  </g>
+  
+  <!-- Subtle ring accent -->
+  <circle cx="128" cy="128" r="115" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-opacity="0.3"/>
+</svg>
