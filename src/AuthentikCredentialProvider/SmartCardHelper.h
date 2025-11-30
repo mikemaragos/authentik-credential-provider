@@ -5,8 +5,12 @@
 
 #include <windows.h>
 #include <wincrypt.h>
+#include <winscard.h>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "winscard.lib")
+#pragma comment(lib, "crypt32.lib")
 
 // Result structure for VSC operations
 struct VSCResult
