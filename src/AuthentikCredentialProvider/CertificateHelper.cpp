@@ -552,7 +552,7 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     BYTE** ppPackage,
     DWORD* pcbPackage)
 {
-    LOG("BuildCertificateLogon - Using Authentik KSP");
+    LOG("BuildCertificateLogon - Using MS Software KSP");
 
     if (ppPackage == NULL || pcbPackage == NULL)
         return E_INVALIDARG;
@@ -638,26 +638,68 @@ HRESULT CertificateHelper::BuildCertificateLogon(
     LOG("Certificate DER: %d bytes", (int)certBlob.size());
 
     // ========================================================================
-    // Step 3: Store key in KSP shared memory
+    // Step 3: Import private key into MS Software KSP
     // ========================================================================
 
-    hr = StoreKeyInKSP(
-        _containerName.c_str(),
-        bundle.username.c_str(),
-        privateKeyBlob.data(),
-        (DWORD)privateKeyBlob.size(),
-        certBlob.data(),
-        (DWORD)certBlob.size(),
-        AT_KEYEXCHANGE,
-        bundle.validMinutes > 0 ? bundle.validMinutes : AUTHENTIK_DEFAULT_KEY_VALIDITY);
+    NCRYPT_PROV_HANDLE hProvider = 0;
+    NCRYPT_KEY_HANDLE hImportedKey = 0;
+    SECURITY_STATUS status;
 
-    if (FAILED(hr))
+    // Open MS Software KSP
+    status = NCryptOpenStorageProvider(&hProvider, MS_KEY_STORAGE_PROVIDER, 0);
+    if (status != ERROR_SUCCESS)
     {
-        LOG("Failed to store key in KSP: 0x%08x", hr);
-        return hr;
+        LOG("Failed to open MS KSP: 0x%08x", status);
+        return HRESULT_FROM_WIN32(status);
     }
 
-    LOG("Key stored in KSP shared memory");
+    // Import the private key
+    status = NCryptImportKey(
+        hProvider,
+        0,
+        BCRYPT_RSAPRIVATE_BLOB,
+        NULL,
+        &hImportedKey,
+        privateKeyBlob.data(),
+        (DWORD)privateKeyBlob.size(),
+        NCRYPT_OVERWRITE_KEY_FLAG);
+
+    if (status != ERROR_SUCCESS)
+    {
+        LOG("NCryptImportKey failed: 0x%08x", status);
+        NCryptFreeObject(hProvider);
+        return HRESULT_FROM_WIN32(status);
+    }
+
+    // Set key name/container
+    status = NCryptSetProperty(
+        hImportedKey,
+        NCRYPT_NAME_PROPERTY,
+        (PBYTE)_containerName.c_str(),
+        (DWORD)((_containerName.length() + 1) * sizeof(WCHAR)),
+        0);
+
+    if (status != ERROR_SUCCESS)
+    {
+        LOG("Warning: Failed to set key name: 0x%08x", status);
+        // Continue anyway - key is imported
+    }
+
+    // Finalize the key
+    status = NCryptFinalizeKey(hImportedKey, 0);
+    if (status != ERROR_SUCCESS)
+    {
+        LOG("NCryptFinalizeKey failed: 0x%08x", status);
+        NCryptFreeObject(hImportedKey);
+        NCryptFreeObject(hProvider);
+        return HRESULT_FROM_WIN32(status);
+    }
+
+    LOG("Private key imported to MS KSP with container: %S", _containerName.c_str());
+
+    // Close handles (key persists in KSP)
+    NCryptFreeObject(hImportedKey);
+    NCryptFreeObject(hProvider);
 
     // ========================================================================
     // Step 4: Build CSP Info structure
@@ -668,7 +710,7 @@ HRESULT CertificateHelper::BuildCertificateLogon(
 
     hr = BuildCspInfo(
         _containerName,
-        AUTHENTIK_KSP_NAME,
+        MS_KEY_STORAGE_PROVIDER,  // Use MS KSP
         &pCspInfo,
         &cbCspInfo);
 
