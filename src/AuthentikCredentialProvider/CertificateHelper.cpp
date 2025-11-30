@@ -269,22 +269,22 @@ HRESULT CertificateHelper::ParsePfxBundle(CertificateBundle& bundle)
     pfxBlob.pbData = pfxData.data();
 
     // Import PFX - we need CRYPT_EXPORTABLE to get the key out
-    // Use user keyset for temporary storage
+    // Use MACHINE keyset so SYSTEM and Kerberos can access it
     HCERTSTORE hTempStore = PFXImportCertStore(
         &pfxBlob,
         bundle.pfxPassword.c_str(),
-        CRYPT_EXPORTABLE | CRYPT_USER_KEYSET);
+        CRYPT_EXPORTABLE | CRYPT_MACHINE_KEYSET);
 
     if (hTempStore == NULL)
     {
         DWORD err = GetLastError();
-        LOG("PFXImportCertStore (user) failed: %d, trying machine keyset", err);
+        LOG("PFXImportCertStore (machine) failed: %d, trying user keyset", err);
         
-        // Try with machine keyset
+        // Try with user keyset as fallback
         hTempStore = PFXImportCertStore(
             &pfxBlob,
             bundle.pfxPassword.c_str(),
-            CRYPT_EXPORTABLE | CRYPT_MACHINE_KEYSET);
+            CRYPT_EXPORTABLE | CRYPT_USER_KEYSET);
     }
 
     if (hTempStore == NULL)
@@ -1107,7 +1107,7 @@ HRESULT CertificateHelper::AssociateKeyWithCert(
     keyProvInfo.pwszContainerName = (LPWSTR)actualContainerName.c_str();
     keyProvInfo.pwszProvName = (LPWSTR)MS_KEY_STORAGE_PROVIDER;
     keyProvInfo.dwProvType = 0;
-    keyProvInfo.dwFlags = 0;  // Use user keyset (same as PFXImportCertStore)
+    keyProvInfo.dwFlags = CRYPT_MACHINE_KEYSET;  // Must match PFXImportCertStore
     keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
 
     if (!CertSetCertificateContextProperty(
