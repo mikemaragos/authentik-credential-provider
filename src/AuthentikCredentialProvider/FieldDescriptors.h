@@ -3,8 +3,11 @@
 
 #pragma once
 
-#include <credentialprovider.h>
 #include <windows.h>
+#include <credentialprovider.h>
+#include <shlwapi.h>
+
+#pragma comment(lib, "shlwapi.lib")
 
 // Field IDs for passwordless authentication
 enum FIELD_ID
@@ -30,12 +33,12 @@ struct FIELD_STATE_PAIR
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
     { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                      CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless",    CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Enter your username",       CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",                  CPFG_NONE },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, L"Authentication Code",       CPFG_NONE },
-    { FID_PIN,        CPFT_PASSWORD_TEXT, L"Smart Card PIN",            CPFG_NONE },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",                   CPFG_NONE },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless",    GUID_NULL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Enter your username",       GUID_NULL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",                  GUID_NULL },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, L"Authentication Code",       GUID_NULL },
+    { FID_PIN,        CPFT_PASSWORD_TEXT, L"Smart Card PIN",            GUID_NULL },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",                   GUID_NULL },
 };
 
 // Initial field state pairs - username step
