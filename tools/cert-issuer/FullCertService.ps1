@@ -2,7 +2,7 @@
 # Complete Certificate Issuer Service with actual AD CS integration
 # Run as Administrator on DC
 #
-# Updated: 2025-11-30 - Added UPN and Email to SAN for CT_FLAG_SUBJECT_REQUIRE_EMAIL templates
+# Updated: 2025-12-01 - Added SID extension (1.3.6.1.4.1.311.25.2) for KB5014754 compliance
 
 $ConfigPath = "C:\ProgramData\Authentik\CertIssuer\config.json"
 $LogPath = "C:\ProgramData\Authentik\CertIssuer\Logs"
@@ -29,6 +29,23 @@ function Write-Log {
     Write-Host "[$ts] $Message" -ForegroundColor $color
 }
 
+function Convert-SidToHex {
+    # Convert SID string to hex bytes for certificate extension
+    param([string]$SidString)
+    
+    try {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($SidString)
+        $sidBytes = New-Object byte[] $sid.BinaryLength
+        $sid.GetBinaryForm($sidBytes, 0)
+        
+        # Return as hex string with spaces
+        return ($sidBytes | ForEach-Object { $_.ToString("X2") }) -join " "
+    } catch {
+        Write-Log "Failed to convert SID to hex: $_" "Error"
+        return $null
+    }
+}
+
 function Issue-Certificate {
     param([string]$Username, [string]$UPN)
     
@@ -38,10 +55,11 @@ function Issue-Certificate {
         return @{ success = $false; error = "CA not configured" }
     }
     
-    # Get UPN and Email from AD
+    # Get UPN, Email, and SID from AD
     $Email = $null
+    $UserSID = $null
     try {
-        $adUser = Get-ADUser -Identity $Username -Properties userPrincipalName, mail, EmailAddress -ErrorAction Stop
+        $adUser = Get-ADUser -Identity $Username -Properties userPrincipalName, mail, EmailAddress, ObjectSID -ErrorAction Stop
         
         # Get UPN from AD if not provided
         if ([string]::IsNullOrEmpty($UPN)) {
@@ -62,6 +80,11 @@ function Issue-Certificate {
         } else {
             Write-Log "Retrieved Email from AD: $Email"
         }
+        
+        # Get SID from AD
+        $UserSID = $adUser.SID.Value
+        Write-Log "Retrieved SID from AD: $UserSID"
+        
     } catch {
         Write-Log "User not found in AD: $_" "Error"
         return @{ success = $false; error = "User '$Username' not found in AD: $_" }
@@ -71,6 +94,10 @@ function Issue-Certificate {
         return @{ success = $false; error = "User has no UPN configured in AD" }
     }
     
+    if ([string]::IsNullOrEmpty($UserSID)) {
+        return @{ success = $false; error = "Could not retrieve user SID from AD" }
+    }
+    
     $id = [guid]::NewGuid().ToString("N").Substring(0, 8)
     $infFile = "$TempPath\req_$id.inf"
     $reqFile = "$TempPath\req_$id.req"
@@ -78,7 +105,18 @@ function Issue-Certificate {
     $pfxFile = "$TempPath\req_$id.pfx"
     
     try {
-        # Create certificate request INF with UPN and Email in SAN
+        # Convert SID to hex for the extension
+        $sidHex = Convert-SidToHex -SidString $UserSID
+        if (-not $sidHex) {
+            throw "Failed to convert SID to hex format"
+        }
+        Write-Log "SID hex bytes: $sidHex"
+        
+        # Build the SID extension value
+        # Format: SEQUENCE { OID 1.3.6.1.4.1.311.25.2.1, OCTET STRING containing SID }
+        # The certreq format for this is complex - we use hex encoding
+        
+        # Create certificate request INF with UPN, Email in SAN, and SID extension
         $inf = @"
 [Version]
 Signature="`$Windows NT`$"
@@ -89,20 +127,29 @@ KeySpec = 1
 KeyLength = 2048
 Exportable = TRUE
 MachineKeySet = FALSE
-ProviderName = "Microsoft RSA SChannel Cryptographic Provider"
+ProviderName = "Microsoft Strong Cryptographic Provider"
+ProviderType = 1
 RequestType = PKCS10
 KeyUsage = 0xa0
 
 [Extensions]
+; Subject Alternative Name with UPN and Email
 2.5.29.17 = "{text}"
 _continue_ = "upn=$UPN&"
 _continue_ = "email=$Email"
+
+; SID extension for KB5014754 Strong Certificate Mapping
+; OID 1.3.6.1.4.1.311.25.2 = szOID_NTDS_CA_SECURITY_EXT
+1.3.6.1.4.1.311.25.2 = "{text}"
+_continue_ = "tag=04"
+_continue_ = "oid=1.3.6.1.4.1.311.25.2.1&"
+_continue_ = "tag=04&hex=$($sidHex -replace ' ','')"
 
 [RequestAttributes]
 CertificateTemplate = $CertTemplate
 "@
         $inf | Out-File $infFile -Encoding ASCII
-        Write-Log "Created INF file with UPN=$UPN and Email=$Email"
+        Write-Log "Created INF file with UPN=$UPN, Email=$Email, SID=$UserSID"
         
         # Generate certificate request
         $output = & certreq -new -q $infFile $reqFile 2>&1
@@ -172,6 +219,14 @@ CertificateTemplate = $CertTemplate
             }
         }
         
+        # Verify SID extension
+        $sidExt = $cert.Extensions | Where-Object { $_.Oid.Value -eq "1.3.6.1.4.1.311.25.2" }
+        if ($sidExt) {
+            Write-Log "SID extension (1.3.6.1.4.1.311.25.2) present in certificate"
+        } else {
+            Write-Log "WARNING: SID extension not found in certificate!" "Warning"
+        }
+        
         # Export to PFX with random password
         $pfxPassword = [guid]::NewGuid().ToString("N").Substring(0, 16)
         $securePassword = ConvertTo-SecureString -String $pfxPassword -Force -AsPlainText
@@ -205,6 +260,7 @@ CertificateTemplate = $CertTemplate
             subject = $subject
             upn = $UPN
             email = $Email
+            sid = $UserSID
             not_before = $notBefore
             not_after = $notAfter
         }
@@ -238,6 +294,7 @@ function Send-JsonResponse {
 # Main
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  Authentik Certificate Issuer Service" -ForegroundColor Cyan
+Write-Host "  (KB5014754 Compliant - SID Extension)" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Port:     $Port" -ForegroundColor White
@@ -285,6 +342,7 @@ try {
                 port = $Port
                 ca = $CAConfig
                 template = $CertTemplate
+                features = @("SAN", "SID_EXTENSION")
             }
             continue
         }
