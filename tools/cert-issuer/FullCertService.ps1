@@ -1,6 +1,8 @@
 # FullCertService.ps1
 # Complete Certificate Issuer Service with actual AD CS integration
 # Run as Administrator on DC
+#
+# Updated: 2025-11-30 - Added UPN and Email to SAN for CT_FLAG_SUBJECT_REQUIRE_EMAIL templates
 
 $ConfigPath = "C:\ProgramData\Authentik\CertIssuer\config.json"
 $LogPath = "C:\ProgramData\Authentik\CertIssuer\Logs"
@@ -36,16 +38,33 @@ function Issue-Certificate {
         return @{ success = $false; error = "CA not configured" }
     }
     
-    # Get UPN from AD if not provided
-    if ([string]::IsNullOrEmpty($UPN)) {
-        try {
-            $adUser = Get-ADUser -Identity $Username -Properties userPrincipalName -ErrorAction Stop
+    # Get UPN and Email from AD
+    $Email = $null
+    try {
+        $adUser = Get-ADUser -Identity $Username -Properties userPrincipalName, mail, EmailAddress -ErrorAction Stop
+        
+        # Get UPN from AD if not provided
+        if ([string]::IsNullOrEmpty($UPN)) {
             $UPN = $adUser.userPrincipalName
             Write-Log "Retrieved UPN from AD: $UPN"
-        } catch {
-            Write-Log "User not found in AD: $_" "Error"
-            return @{ success = $false; error = "User '$Username' not found in AD: $_" }
         }
+        
+        # Get Email from AD
+        $Email = $adUser.mail
+        if ([string]::IsNullOrEmpty($Email)) {
+            $Email = $adUser.EmailAddress
+        }
+        
+        # If still no email, use UPN as email (common pattern for AD)
+        if ([string]::IsNullOrEmpty($Email)) {
+            $Email = $UPN
+            Write-Log "No email in AD, using UPN as email: $Email"
+        } else {
+            Write-Log "Retrieved Email from AD: $Email"
+        }
+    } catch {
+        Write-Log "User not found in AD: $_" "Error"
+        return @{ success = $false; error = "User '$Username' not found in AD: $_" }
     }
     
     if ([string]::IsNullOrEmpty($UPN)) {
@@ -59,7 +78,7 @@ function Issue-Certificate {
     $pfxFile = "$TempPath\req_$id.pfx"
     
     try {
-        # Create certificate request INF
+        # Create certificate request INF with UPN and Email in SAN
         $inf = @"
 [Version]
 Signature="`$Windows NT`$"
@@ -74,11 +93,16 @@ ProviderName = "Microsoft RSA SChannel Cryptographic Provider"
 RequestType = PKCS10
 KeyUsage = 0xa0
 
+[Extensions]
+2.5.29.17 = "{text}"
+_continue_ = "upn=$UPN&"
+_continue_ = "email=$Email"
+
 [RequestAttributes]
 CertificateTemplate = $CertTemplate
 "@
         $inf | Out-File $infFile -Encoding ASCII
-        Write-Log "Created INF file"
+        Write-Log "Created INF file with UPN=$UPN and Email=$Email"
         
         # Generate certificate request
         $output = & certreq -new -q $infFile $reqFile 2>&1
@@ -131,14 +155,20 @@ CertificateTemplate = $CertTemplate
         
         Write-Log "Found certificate with private key"
         
-        # Verify UPN in SAN
+        # Verify UPN and Email in SAN
         $san = $cert.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" }
         if ($san) {
             $sanText = $san.Format($true)
+            Write-Log "SAN contents: $sanText"
             if ($sanText -match "Principal Name") {
                 Write-Log "UPN verified in SAN"
             } else {
                 Write-Log "WARNING: UPN not found in SAN!" "Warning"
+            }
+            if ($sanText -match "RFC822" -or $sanText -match "email") {
+                Write-Log "Email verified in SAN"
+            } else {
+                Write-Log "WARNING: Email not found in SAN!" "Warning"
             }
         }
         
@@ -174,6 +204,7 @@ CertificateTemplate = $CertTemplate
             pfx_password = $pfxPassword
             subject = $subject
             upn = $UPN
+            email = $Email
             not_before = $notBefore
             not_after = $notAfter
         }
