@@ -1,0 +1,7 @@
+{
+  "Port": 8443,
+  "ApiToken": "CHANGE_ME_TO_RANDOM_32_CHAR_STRING",
+  "CAConfig": "YOUR-DC.domain.local\\Your-CA-Name",
+  "CertTemplate": "AuthentikSmartcard",
+  "UseHttps": false
+}
