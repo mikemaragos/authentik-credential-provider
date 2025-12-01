@@ -709,6 +709,14 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
         LOG("Parsed: Authentication successful (redirect)");
         return response;  // Return immediately on success
     }
+    // Check for xak-flow-redirect component (Authentik flow completion)
+    if (json.find(L"xak-flow-redirect") != std::wstring::npos)
+    {
+        response.success = true;
+        response.message = L"Authentication successful";
+        LOG("Parsed: Authentication successful (xak-flow-redirect)");
+        return response;
+    }
     // Check for native flow completion
     if (json.find(L"\"type\":\"native\"") != std::wstring::npos && 
         json.find(L"\"to\":\"") != std::wstring::npos)
