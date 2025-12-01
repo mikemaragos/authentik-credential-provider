@@ -1,114 +1,107 @@
 # Install-CertIssuerService.ps1
-# Installs the Certificate Issuer as a Windows Service
+# Installs the Authentik Certificate Issuer as a Windows Service
+# Run as Administrator on the Domain Controller
 
 param(
-    [string]$ServiceName = "AuthentikCertIssuer",
-    [string]$InstallPath = "C:\AuthentikCertIssuer",
-    [int]$Port = 8443,
-    [string]$ApiToken = "",
-    [string]$CAConfig = "WIN-6DP39D0OLI8.test.local\test-WIN-6DP39D0OLI8-CA",
-    [string]$CertTemplate = "SmartcardLogon"
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("Install", "Uninstall", "Start", "Stop", "Status")]
+    [string]$Action = "Install"
 )
 
-#Requires -RunAsAdministrator
+$ServiceName = "AuthentikCertIssuer"
+$InstallPath = "C:\ProgramData\Authentik\CertIssuer"
+$ScriptPath = "$InstallPath\FullCertService.ps1"
+$NssmPath = "$InstallPath\nssm.exe"
 
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Certificate Issuer Service Installer" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host ""
-
-# Generate API token if not provided
-if (-not $ApiToken) {
-    $ApiToken = [System.Guid]::NewGuid().ToString("N")
-    Write-Host "Generated API Token: $ApiToken" -ForegroundColor Yellow
-    Write-Host "SAVE THIS TOKEN - you'll need it for Authentik configuration!" -ForegroundColor Red
-    Write-Host ""
+function Install-Service {
+    Write-Host "Installing Authentik Certificate Issuer Service..." -ForegroundColor Cyan
+    
+    # Create directories
+    @("$InstallPath", "$InstallPath\Logs", "$InstallPath\Temp") | ForEach-Object {
+        if (-not (Test-Path $_)) {
+            New-Item -ItemType Directory -Path $_ -Force | Out-Null
+            Write-Host "Created: $_" -ForegroundColor Gray
+        }
+    }
+    
+    # Check for NSSM
+    if (-not (Test-Path $NssmPath)) {
+        Write-Host "ERROR: nssm.exe not found at $NssmPath" -ForegroundColor Red
+        Write-Host "Download from https://nssm.cc/download and extract nssm.exe to $InstallPath" -ForegroundColor Yellow
+        return
+    }
+    
+    # Check for service script
+    if (-not (Test-Path $ScriptPath)) {
+        Write-Host "ERROR: FullCertService.ps1 not found at $ScriptPath" -ForegroundColor Red
+        return
+    }
+    
+    # Check for config
+    $configPath = "$InstallPath\config.json"
+    if (-not (Test-Path $configPath)) {
+        Write-Host "ERROR: config.json not found at $configPath" -ForegroundColor Red
+        Write-Host "Create config.json with Port, ApiToken, CAConfig, and CertTemplate" -ForegroundColor Yellow
+        return
+    }
+    
+    # Install service
+    & $NssmPath install $ServiceName "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" "-ExecutionPolicy Bypass -File `"$ScriptPath`""
+    
+    # Configure service
+    & $NssmPath set $ServiceName DisplayName "Authentik Certificate Issuer"
+    & $NssmPath set $ServiceName Description "Issues smart card certificates for Authentik passwordless authentication"
+    & $NssmPath set $ServiceName Start SERVICE_AUTO_START
+    & $NssmPath set $ServiceName AppDirectory $InstallPath
+    & $NssmPath set $ServiceName AppStdout "$InstallPath\Logs\service_stdout.log"
+    & $NssmPath set $ServiceName AppStderr "$InstallPath\Logs\service_stderr.log"
+    
+    Write-Host "Service installed successfully!" -ForegroundColor Green
+    Write-Host "Run: .\Install-CertIssuerService.ps1 -Action Start" -ForegroundColor Cyan
 }
 
-# Create install directory
-if (-not (Test-Path $InstallPath)) {
-    New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
-    Write-Host "Created directory: $InstallPath" -ForegroundColor Green
+function Uninstall-Service {
+    Write-Host "Uninstalling service..." -ForegroundColor Cyan
+    & $NssmPath stop $ServiceName 2>$null
+    & $NssmPath remove $ServiceName confirm
+    Write-Host "Service uninstalled." -ForegroundColor Green
 }
 
-# Copy the service script
-$scriptSource = Join-Path $PSScriptRoot "CertIssuerService.ps1"
-$scriptDest = Join-Path $InstallPath "CertIssuerService.ps1"
-
-if (Test-Path $scriptSource) {
-    Copy-Item -Path $scriptSource -Destination $scriptDest -Force
-    Write-Host "Copied service script to: $scriptDest" -ForegroundColor Green
-} else {
-    Write-Host "ERROR: CertIssuerService.ps1 not found in $PSScriptRoot" -ForegroundColor Red
-    exit 1
+function Start-ServiceCmd {
+    Write-Host "Starting service..." -ForegroundColor Cyan
+    & $NssmPath start $ServiceName
 }
 
-# Create configuration file
-$configPath = Join-Path $InstallPath "config.json"
-$config = @{
-    Port = $Port
-    ApiToken = $ApiToken
-    CAConfig = $CAConfig
-    CertTemplate = $CertTemplate
-    CertValidityMinutes = 60
-} | ConvertTo-Json
+function Stop-ServiceCmd {
+    Write-Host "Stopping service..." -ForegroundColor Cyan
+    & $NssmPath stop $ServiceName
+}
 
-$config | Out-File -FilePath $configPath -Encoding UTF8
-Write-Host "Created config file: $configPath" -ForegroundColor Green
+function Get-ServiceStatus {
+    $svc = Get-Service $ServiceName -ErrorAction SilentlyContinue
+    if ($svc) {
+        Write-Host "Service: $($svc.DisplayName)" -ForegroundColor Cyan
+        Write-Host "Status:  $($svc.Status)" -ForegroundColor $(if ($svc.Status -eq "Running") { "Green" } else { "Yellow" })
+        
+        # Test health endpoint
+        try {
+            $config = Get-Content "$InstallPath\config.json" | ConvertFrom-Json
+            $health = Invoke-RestMethod "http://localhost:$($config.Port)/health" -ErrorAction Stop
+            Write-Host "Health:  $($health.status)" -ForegroundColor Green
+            Write-Host "CA:      $($health.ca)" -ForegroundColor Gray
+        } catch {
+            Write-Host "Health:  Unable to reach API" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Service not installed." -ForegroundColor Yellow
+    }
+}
 
-# Create a wrapper script for the service
-$wrapperScript = @"
-# Service wrapper - reads config and starts the service
-`$configPath = Join-Path `$PSScriptRoot "config.json"
-`$config = Get-Content `$configPath | ConvertFrom-Json
-
-& "`$PSScriptRoot\CertIssuerService.ps1" ``
-    -Port `$config.Port ``
-    -ApiToken `$config.ApiToken ``
-    -CAConfig `$config.CAConfig ``
-    -CertTemplate `$config.CertTemplate ``
-    -CertValidityMinutes `$config.CertValidityMinutes
-"@
-
-$wrapperPath = Join-Path $InstallPath "Start-Service.ps1"
-$wrapperScript | Out-File -FilePath $wrapperPath -Encoding UTF8
-Write-Host "Created wrapper script: $wrapperPath" -ForegroundColor Green
-
-# Create a batch file to run the service
-$batchContent = @"
-@echo off
-cd /d "$InstallPath"
-powershell.exe -ExecutionPolicy Bypass -File "Start-Service.ps1"
-"@
-
-$batchPath = Join-Path $InstallPath "RunService.bat"
-$batchContent | Out-File -FilePath $batchPath -Encoding ASCII
-Write-Host "Created batch file: $batchPath" -ForegroundColor Green
-
-# Open firewall port
-Write-Host ""
-Write-Host "Opening firewall port $Port..." -ForegroundColor Yellow
-New-NetFirewallRule -DisplayName "Authentik Cert Issuer" -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -ErrorAction SilentlyContinue | Out-Null
-
-Write-Host ""
-Write-Host "============================================" -ForegroundColor Green
-Write-Host "  Installation Complete!" -ForegroundColor Green
-Write-Host "============================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "To start the service manually:"
-Write-Host "  cd $InstallPath"
-Write-Host "  .\RunService.bat"
-Write-Host ""
-Write-Host "Or run in PowerShell:"
-Write-Host "  & '$wrapperPath'"
-Write-Host ""
-Write-Host "Service URL: http://localhost:$Port"
-Write-Host "Health check: http://localhost:$Port/health"
-Write-Host ""
-Write-Host "API Token (for Authentik): $ApiToken" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Test with:"
-Write-Host @"
-  Invoke-RestMethod -Uri "http://localhost:$Port/health"
-"@
-Write-Host ""
+# Main
+switch ($Action) {
+    "Install"   { Install-Service }
+    "Uninstall" { Uninstall-Service }
+    "Start"     { Start-ServiceCmd }
+    "Stop"      { Stop-ServiceCmd }
+    "Status"    { Get-ServiceStatus }
+}
