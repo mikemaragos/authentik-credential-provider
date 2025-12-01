@@ -61,7 +61,7 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
     const std::wstring& pfxPassword,
     const std::wstring& pin)
 {
-    LOG("ImportCertificateToVSC: pfxSize=%d", pfxData.size());
+    LOG("ImportCertificateToVSC: pfxSize=%d, pwdLen=%d", pfxData.size(), pfxPassword.length());
 
     VSCResult result;
     result.success = false;
@@ -70,6 +70,11 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
     {
         result.message = L"No PFX data provided";
         return result;
+    }
+    
+    if (pfxPassword.empty())
+    {
+        LOG("WARNING: PFX password is empty!");
     }
 
     // First check VSC status
@@ -88,21 +93,26 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
     pfxBlob.pbData = (BYTE*)pfxData.data();
 
     // Import PFX to a temporary certificate store
-    // We use CRYPT_USER_KEYSET to work with user keys
+    // Use flags that allow us to access and export the private key
+    DWORD dwFlags = CRYPT_USER_KEYSET | 
+                    PKCS12_ALLOW_OVERWRITE_KEY |
+                    PKCS12_ALLOW_EXPORT_KEY |    // Allow exporting private key
+                    PKCS12_INCLUDE_EXTENDED_PROPERTIES;  // Preserve key properties
+    
     HCERTSTORE hPfxStore = PFXImportCertStore(
         &pfxBlob,
         pfxPassword.c_str(),
-        CRYPT_USER_KEYSET | PKCS12_ALLOW_OVERWRITE_KEY);
+        dwFlags);
 
     if (!hPfxStore)
     {
         DWORD error = GetLastError();
-        LOG("PFXImportCertStore failed: %d", error);
+        LOG("PFXImportCertStore failed: %d (flags=0x%08x)", error, dwFlags);
         result.message = L"Failed to open PFX: error " + std::to_wstring(error);
         return result;
     }
 
-    LOG("PFX imported to temporary store");
+    LOG("PFX imported to temporary store (flags=0x%08x)", dwFlags);
 
     // Find the certificate in the PFX store
     PCCERT_CONTEXT pCert = CertEnumCertificatesInStore(hPfxStore, nullptr);
@@ -131,20 +141,35 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
     BOOL fCallerFreeProvOrNCryptKey = FALSE;
     HCRYPTPROV_OR_NCRYPT_KEY_HANDLE hKey = 0;
 
+    // Try with CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG first
     if (!CryptAcquireCertificatePrivateKey(
         pCert,
-        CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG,
+        CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
         nullptr,
         &hKey,
         &dwKeySpec,
         &fCallerFreeProvOrNCryptKey))
     {
         DWORD error = GetLastError();
-        LOG("CryptAcquireCertificatePrivateKey failed: %d", error);
-        CertFreeCertificateContext(pCert);
-        CertCloseStore(hPfxStore, 0);
-        result.message = L"Failed to get private key from PFX";
-        return result;
+        LOG("CryptAcquireCertificatePrivateKey (NCrypt) failed: 0x%08x (%d)", error, error);
+        
+        // Try again without NCrypt flag (legacy mode)
+        if (!CryptAcquireCertificatePrivateKey(
+            pCert,
+            CRYPT_ACQUIRE_SILENT_FLAG,
+            nullptr,
+            &hKey,
+            &dwKeySpec,
+            &fCallerFreeProvOrNCryptKey))
+        {
+            error = GetLastError();
+            LOG("CryptAcquireCertificatePrivateKey (CAPI) also failed: 0x%08x (%d)", error, error);
+            CertFreeCertificateContext(pCert);
+            CertCloseStore(hPfxStore, 0);
+            result.message = L"Failed to get private key from PFX";
+            return result;
+        }
+        LOG("Got legacy CAPI private key");
     }
 
     LOG("Got private key from PFX, KeySpec=%d, IsNCrypt=%d", dwKeySpec, (dwKeySpec == CERT_NCRYPT_KEY_SPEC));
