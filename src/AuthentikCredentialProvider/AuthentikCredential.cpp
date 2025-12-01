@@ -253,7 +253,7 @@ HRESULT CAuthentikCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
 {
     if (dwFieldID == FID_LOGO)
     {
-        // Load icon from resources and convert to bitmap
+        // Load icon from resources
         HICON hIcon = (HICON)LoadImageW(
             g_hinst,
             MAKEINTRESOURCEW(IDB_TILE_ICON),
@@ -263,21 +263,46 @@ HRESULT CAuthentikCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
         
         if (hIcon)
         {
-            // Convert icon to bitmap
-            ICONINFO iconInfo;
-            if (GetIconInfo(hIcon, &iconInfo))
+            // Create a 32-bit ARGB bitmap to preserve transparency
+            BITMAPINFO bmi = {};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = 48;
+            bmi.bmiHeader.biHeight = -48;  // Top-down DIB (negative height)
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            
+            void* pvBits = nullptr;
+            HDC hdcScreen = GetDC(nullptr);
+            HBITMAP hBitmap = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &pvBits, nullptr, 0);
+            
+            if (hBitmap && pvBits)
             {
-                *phbmp = iconInfo.hbmColor;
-                // Delete the mask bitmap as we don't need it
-                if (iconInfo.hbmMask)
-                {
-                    DeleteObject(iconInfo.hbmMask);
-                }
-                DestroyIcon(hIcon);
-                LOG("GetBitmapValue: Loaded tile icon successfully");
-                return S_OK;
+                // Create a memory DC and select our bitmap
+                HDC hdcMem = CreateCompatibleDC(hdcScreen);
+                HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
+                
+                // Fill with transparent background (all zeros = fully transparent black)
+                memset(pvBits, 0, 48 * 48 * 4);
+                
+                // Draw the icon onto the bitmap - this preserves alpha
+                DrawIconEx(hdcMem, 0, 0, hIcon, 48, 48, 0, nullptr, DI_NORMAL);
+                
+                SelectObject(hdcMem, hOldBitmap);
+                DeleteDC(hdcMem);
+                
+                *phbmp = hBitmap;
+                LOG("GetBitmapValue: Loaded tile icon with transparency");
             }
+            else
+            {
+                LOG("GetBitmapValue: Failed to create DIB section");
+                *phbmp = nullptr;
+            }
+            
+            ReleaseDC(nullptr, hdcScreen);
             DestroyIcon(hIcon);
+            return S_OK;
         }
         
         LOG("GetBitmapValue: Failed to load tile icon, error=%d", GetLastError());
