@@ -126,21 +126,18 @@ HRESULT CAuthentikCredential::Initialize(
     _cpus = cpus;
     _ulAuthPackage = ulAuthPackage;
 
-    // Copy field descriptors and initial state
+    // Copy field state pairs and initialize field strings
     for (DWORD i = 0; i < ARRAYSIZE(s_rgFieldStatePairsLogon); i++)
     {
         _rgFieldStatePairs[i] = s_rgFieldStatePairsLogon[i];
-
-        // Copy field strings
-        if (rgcpfd[i].pszLabel)
-        {
-            SHStrDupW(rgcpfd[i].pszLabel, &_rgFieldStrings[i]);
-        }
+        _rgFieldStrings[i] = nullptr;  // Initialize all to nullptr
     }
 
-    // Set default text
+    // Set display text fields ONLY (not input fields - those stay empty for user input)
     SHStrDupW(L"Authentik Passwordless", &_rgFieldStrings[FID_LARGE_TEXT]);
     SHStrDupW(L"Enter your username", &_rgFieldStrings[FID_SMALL_TEXT]);
+    
+    // Input fields (FID_USERNAME, FID_OTP, FID_PIN) stay nullptr = empty text boxes
 
     // Check VSC status on init
     VSCResult vscStatus = _pSmartCardHelper->CheckVSCStatus();
