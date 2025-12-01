@@ -643,30 +643,44 @@ cleanup:
 AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json)
 {
     LOG("Parsing Authentik response");
+    
+    // Log response preview for debugging (first 500 chars)
+    std::wstring preview = json.substr(0, min((size_t)500, json.length()));
+    LOG("Response preview: %S", preview.c_str());
 
     AuthentikResponse response;
     response.success = false;
     response.requiresOTP = false;
 
-    // Check for success (redirect type indicates flow complete)
+    // Check for success (redirect type indicates flow complete) - CHECK FIRST
     if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos)
     {
         response.success = true;
         response.message = L"Authentication successful";
         LOG("Parsed: Authentication successful (redirect)");
+        return response;  // Return immediately on success
     }
     // Check for native flow completion
-    else if (json.find(L"\"type\":\"native\"") != std::wstring::npos && 
-             json.find(L"\"to\":\"") != std::wstring::npos)
+    if (json.find(L"\"type\":\"native\"") != std::wstring::npos && 
+        json.find(L"\"to\":\"") != std::wstring::npos)
     {
         response.success = true;
         response.message = L"Authentication successful";
         LOG("Parsed: Authentication successful (native)");
+        return response;
+    }
+    // Check for shell (flow complete with shell response)
+    if (json.find(L"\"type\":\"shell\"") != std::wstring::npos)
+    {
+        response.success = true;
+        response.message = L"Authentication successful";
+        LOG("Parsed: Authentication successful (shell)");
+        return response;
     }
     // Check for OTP/authenticator challenge
-    else if (json.find(L"ak-stage-authenticator-validate") != std::wstring::npos ||
-             json.find(L"authenticator_validate") != std::wstring::npos ||
-             json.find(L"\"component\":\"ak-stage-authenticator") != std::wstring::npos)
+    if (json.find(L"ak-stage-authenticator-validate") != std::wstring::npos ||
+        json.find(L"authenticator_validate") != std::wstring::npos ||
+        json.find(L"\"component\":\"ak-stage-authenticator") != std::wstring::npos)
     {
         response.requiresOTP = true;
         response.message = L"Enter your authentication code";
@@ -675,17 +689,19 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
         response.flowToken = _ExtractJsonString(json, L"flow_token");
         
         LOG("Parsed: OTP required");
+        return response;
     }
     // Check for identification stage (username prompt)
-    else if (json.find(L"ak-stage-identification") != std::wstring::npos)
+    if (json.find(L"ak-stage-identification") != std::wstring::npos)
     {
         response.success = false;
         response.message = L"Enter username";
         LOG("Parsed: Identification stage");
+        return response;
     }
     // Check for error
-    else if (json.find(L"\"error\"") != std::wstring::npos ||
-             json.find(L"\"errors\"") != std::wstring::npos)
+    if (json.find(L"\"error\"") != std::wstring::npos ||
+        json.find(L"\"errors\"") != std::wstring::npos)
     {
         response.success = false;
         response.message = _ExtractJsonString(json, L"error");
@@ -694,14 +710,13 @@ AuthentikResponse AuthentikAPI::_ParseAuthentikResponse(const std::wstring& json
             response.message = L"Authentication failed";
         }
         LOG("Parsed: Error - %S", response.message.c_str());
+        return response;
     }
-    else
-    {
-        // Unknown state - might be in the middle of flow
-        response.success = false;
-        response.message = L"Continue authentication...";
-        LOG("Parsed: Unknown/continuing state");
-    }
+
+    // Unknown state - log for debugging
+    response.success = false;
+    response.message = L"Continue authentication...";
+    LOG("Parsed: Unknown/continuing state - check response preview");
 
     return response;
 }
