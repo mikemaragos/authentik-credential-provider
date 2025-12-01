@@ -15,9 +15,13 @@
 #pragma comment(lib, "credui.lib")
 #pragma comment(lib, "shlwapi.lib")
 
-// DLL reference counting (defined in Dll.cpp)
+// DLL reference counting and instance handle (defined in Dll.cpp)
 extern void DllAddRef();
 extern void DllRelease();
+extern HINSTANCE g_hinst;
+
+// Resource ID for tile icon (defined in resource.rc)
+#define IDB_TILE_ICON 101
 
 // Field state pairs for different usage scenarios
 static const FIELD_STATE_PAIR s_rgFieldStatePairsLogon[] =
@@ -249,8 +253,36 @@ HRESULT CAuthentikCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
 {
     if (dwFieldID == FID_LOGO)
     {
+        // Load icon from resources and convert to bitmap
+        HICON hIcon = (HICON)LoadImageW(
+            g_hinst,
+            MAKEINTRESOURCEW(IDB_TILE_ICON),
+            IMAGE_ICON,
+            48, 48,  // Standard tile icon size
+            LR_DEFAULTCOLOR);
+        
+        if (hIcon)
+        {
+            // Convert icon to bitmap
+            ICONINFO iconInfo;
+            if (GetIconInfo(hIcon, &iconInfo))
+            {
+                *phbmp = iconInfo.hbmColor;
+                // Delete the mask bitmap as we don't need it
+                if (iconInfo.hbmMask)
+                {
+                    DeleteObject(iconInfo.hbmMask);
+                }
+                DestroyIcon(hIcon);
+                LOG("GetBitmapValue: Loaded tile icon successfully");
+                return S_OK;
+            }
+            DestroyIcon(hIcon);
+        }
+        
+        LOG("GetBitmapValue: Failed to load tile icon, error=%d", GetLastError());
         *phbmp = nullptr;
-        return S_OK;
+        return S_OK;  // Return OK even without icon - Windows will use default
     }
     return E_INVALIDARG;
 }
