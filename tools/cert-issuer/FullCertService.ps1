@@ -262,6 +262,25 @@ CertificateTemplate = $CertTemplate
             Write-Log "WARNING: SID extension not found in certificate!" "Warning"
         }
         
+        # Set altSecurityIdentities mapping for KB5014754 compliance
+        try {
+            $serialNumber = $cert.SerialNumber
+            # Format issuer DN for X509 mapping (reverse order, use DC= format)
+            $issuerDN = "DC=local,DC=test,CN=test-WIN-6DP39D0OLI8-CA"
+            $mapping = "X509:<I>$issuerDN<SR>$serialNumber"
+            
+            # Get current mappings and add new one
+            $currentMappings = (Get-ADUser $Username -Properties altSecurityIdentities).altSecurityIdentities
+            if ($currentMappings -notcontains $mapping) {
+                Set-ADUser $Username -Add @{altSecurityIdentities=$mapping}
+                Write-Log "Added altSecurityIdentities mapping: $mapping"
+            } else {
+                Write-Log "altSecurityIdentities mapping already exists"
+            }
+        } catch {
+            Write-Log "WARNING: Failed to set altSecurityIdentities: $_" "Warning"
+        }
+        
         # Export to PFX with random password
         $pfxPassword = [guid]::NewGuid().ToString("N").Substring(0, 16)
         $securePassword = ConvertTo-SecureString -String $pfxPassword -Force -AsPlainText
@@ -274,6 +293,7 @@ CertificateTemplate = $CertTemplate
         
         # Store certificate details
         $subject = $cert.Subject
+        $serialNumber = $cert.SerialNumber
         $notBefore = $cert.NotBefore.ToString("o")
         $notAfter = $cert.NotAfter.ToString("o")
         
@@ -290,6 +310,7 @@ CertificateTemplate = $CertTemplate
         return @{
             success = $true
             thumbprint = $thumbprint
+            serial_number = $serialNumber
             pfx_base64 = $pfxBase64
             pfx_password = $pfxPassword
             subject = $subject
