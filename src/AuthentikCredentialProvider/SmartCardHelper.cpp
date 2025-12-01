@@ -107,8 +107,9 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
     pfxBlob.pbData = (BYTE*)pfxData.data();
 
     // Import PFX to a temporary certificate store
-    // Start with minimal flags, add more if needed
-    DWORD dwFlags = CRYPT_EXPORTABLE;  // Allow key to be exported
+    // CRYPT_EXPORTABLE: Allow key to be exported later
+    // CRYPT_USER_KEYSET: Store key in user's key container (required for access)
+    DWORD dwFlags = CRYPT_EXPORTABLE | CRYPT_USER_KEYSET;
     
     LOG("Attempting PFXImportCertStore with flags=0x%08x", dwFlags);
     
