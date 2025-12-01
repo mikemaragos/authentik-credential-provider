@@ -39,6 +39,10 @@ AuthentikAPI::~AuthentikAPI()
 AuthentikResponse AuthentikAPI::InitiateAuthentication(const std::wstring& username)
 {
     LOG("InitiateAuthentication: user=%S", username.c_str());
+    
+    // Clear any previous session cookies to start fresh
+    _sessionCookies.clear();
+    LOG("Cleared previous session cookies");
 
     AuthentikResponse response;
     response.success = false;
@@ -46,13 +50,27 @@ AuthentikResponse AuthentikAPI::InitiateAuthentication(const std::wstring& usern
 
     // Build request URL for flow executor
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
+    
+    // Step 1: GET request to start the flow and get initial challenge
+    std::wstring getResponseBody;
+    HRESULT hr = _MakeHttpRequest(L"GET", url, L"", getResponseBody);
+    
+    if (FAILED(hr))
+    {
+        LOG("InitiateAuthentication: Failed to start flow: 0x%08x", hr);
+        response.message = L"Failed to connect to authentication server";
+        return response;
+    }
+    
+    LOG("InitiateAuthentication: Flow started, got initial challenge");
 
-    // Build JSON payload - just username for identification stage
+    // Step 2: POST username to complete identification stage
     std::wstring payload = L"{\"uid_field\":\"" + username + L"\"}";
+    LOG("InitiateAuthentication: Sending payload: %S", payload.c_str());
 
     // Make HTTP request
     std::wstring responseBody;
-    HRESULT hr = _MakeHttpRequest(L"POST", url, payload, responseBody);
+    hr = _MakeHttpRequest(L"POST", url, payload, responseBody);
 
     if (SUCCEEDED(hr))
     {
@@ -72,7 +90,7 @@ AuthentikResponse AuthentikAPI::InitiateAuthentication(const std::wstring& usern
 // Validate OTP
 AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const std::wstring& otp, const std::wstring& flowToken)
 {
-    LOG("ValidateOTP: user=%S", username.c_str());
+    LOG("ValidateOTP: user=%S, otp_length=%d", username.c_str(), (int)otp.length());
 
     AuthentikResponse response;
     response.success = false;
@@ -83,6 +101,9 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
 
     // Build JSON payload with OTP code
     std::wstring payload = L"{\"code\":\"" + otp + L"\"}";
+    
+    LOG("ValidateOTP: Sending payload: %S", payload.c_str());
+    LOG("ValidateOTP: Session cookies: %S", _sessionCookies.empty() ? L"(none)" : _sessionCookies.substr(0, 100).c_str());
 
     // Make HTTP request (cookies should maintain session)
     std::wstring responseBody;
@@ -410,20 +431,48 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         goto cleanup;
     }
 
-    // Extract cookies from response headers
+    // Extract ALL cookies from response headers
     {
-        DWORD dwCookieSize = 0;
-        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_SET_COOKIE, WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &dwCookieSize, WINHTTP_NO_HEADER_INDEX);
-        if (dwCookieSize > 0)
+        DWORD dwIndex = 0;
+        while (true)
         {
-            std::vector<wchar_t> cookieBuffer(dwCookieSize / sizeof(wchar_t) + 1);
-            if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_SET_COOKIE, WINHTTP_HEADER_NAME_BY_INDEX, &cookieBuffer[0], &dwCookieSize, WINHTTP_NO_HEADER_INDEX))
+            DWORD dwCookieSize = 0;
+            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_SET_COOKIE, WINHTTP_HEADER_NAME_BY_INDEX, nullptr, &dwCookieSize, &dwIndex);
+            
+            if (GetLastError() == ERROR_WINHTTP_HEADER_NOT_FOUND)
             {
-                // Append to session cookies (simplified - should parse properly)
-                if (!_sessionCookies.empty()) _sessionCookies += L"; ";
-                _sessionCookies += &cookieBuffer[0];
-                LOG("Session cookie updated");
+                break;  // No more cookies
             }
+            
+            if (dwCookieSize > 0)
+            {
+                std::vector<wchar_t> cookieBuffer(dwCookieSize / sizeof(wchar_t) + 1);
+                DWORD tempIndex = dwIndex;  // WinHttpQueryHeaders modifies the index
+                if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_SET_COOKIE, WINHTTP_HEADER_NAME_BY_INDEX, &cookieBuffer[0], &dwCookieSize, &tempIndex))
+                {
+                    std::wstring fullCookie = &cookieBuffer[0];
+                    
+                    // Extract just the name=value part (before the first semicolon)
+                    size_t semicolonPos = fullCookie.find(L';');
+                    std::wstring cookieValue = (semicolonPos != std::wstring::npos) 
+                        ? fullCookie.substr(0, semicolonPos) 
+                        : fullCookie;
+                    
+                    // Add to session cookies if not empty
+                    if (!cookieValue.empty())
+                    {
+                        if (!_sessionCookies.empty()) _sessionCookies += L"; ";
+                        _sessionCookies += cookieValue;
+                        LOG("Cookie captured: %S", cookieValue.c_str());
+                    }
+                }
+            }
+            dwIndex++;
+        }
+        
+        if (!_sessionCookies.empty())
+        {
+            LOG("Total session cookies: %S", _sessionCookies.substr(0, 200).c_str());
         }
     }
 
