@@ -29,19 +29,61 @@ function Write-Log {
     Write-Host "[$ts] $Message" -ForegroundColor $color
 }
 
-function Convert-SidToHex {
-    # Convert SID string to hex bytes for certificate extension
+function Build-SidExtensionHex {
+    # Build the full ASN.1 DER-encoded SID extension for KB5014754
+    # OID 1.3.6.1.4.1.311.25.2 contains SEQUENCE { SEQUENCE { OID 1.3.6.1.4.1.311.25.2.1, OCTET STRING (SID) } }
     param([string]$SidString)
     
     try {
+        # Convert SID to bytes
         $sid = New-Object System.Security.Principal.SecurityIdentifier($SidString)
         $sidBytes = New-Object byte[] $sid.BinaryLength
         $sid.GetBinaryForm($sidBytes, 0)
         
-        # Return as hex string with spaces
-        return ($sidBytes | ForEach-Object { $_.ToString("X2") }) -join " "
+        # OID 1.3.6.1.4.1.311.25.2.1 in DER: 06 0a 2b 06 01 04 01 82 37 19 02 01
+        $oidBytes = [byte[]](0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x19, 0x02, 0x01)
+        
+        # Build OCTET STRING containing SID
+        $octetString = [System.Collections.Generic.List[byte]]::new()
+        $octetString.Add(0x04)  # OCTET STRING tag
+        if ($sidBytes.Length -lt 128) {
+            $octetString.Add([byte]$sidBytes.Length)
+        } else {
+            # Long form length encoding (shouldn't happen for SIDs)
+            $octetString.Add(0x81)
+            $octetString.Add([byte]$sidBytes.Length)
+        }
+        $octetString.AddRange($sidBytes)
+        
+        # Build inner SEQUENCE (OID + OCTET STRING)
+        $innerSeq = [System.Collections.Generic.List[byte]]::new()
+        $innerSeq.Add(0x30)  # SEQUENCE tag
+        $innerLen = $oidBytes.Length + $octetString.Count
+        if ($innerLen -lt 128) {
+            $innerSeq.Add([byte]$innerLen)
+        } else {
+            $innerSeq.Add(0x81)
+            $innerSeq.Add([byte]$innerLen)
+        }
+        $innerSeq.AddRange($oidBytes)
+        $innerSeq.AddRange($octetString)
+        
+        # Build outer SEQUENCE
+        $outerSeq = [System.Collections.Generic.List[byte]]::new()
+        $outerSeq.Add(0x30)  # SEQUENCE tag
+        $outerLen = $innerSeq.Count
+        if ($outerLen -lt 128) {
+            $outerSeq.Add([byte]$outerLen)
+        } else {
+            $outerSeq.Add(0x81)
+            $outerSeq.Add([byte]$outerLen)
+        }
+        $outerSeq.AddRange($innerSeq)
+        
+        # Return as hex string (no spaces)
+        return ($outerSeq | ForEach-Object { $_.ToString("X2") }) -join ""
     } catch {
-        Write-Log "Failed to convert SID to hex: $_" "Error"
+        Write-Log "Failed to build SID extension: $_" "Error"
         return $null
     }
 }
@@ -105,16 +147,12 @@ function Issue-Certificate {
     $pfxFile = "$TempPath\req_$id.pfx"
     
     try {
-        # Convert SID to hex for the extension
-        $sidHex = Convert-SidToHex -SidString $UserSID
-        if (-not $sidHex) {
-            throw "Failed to convert SID to hex format"
+        # Build the full DER-encoded SID extension
+        $sidExtHex = Build-SidExtensionHex -SidString $UserSID
+        if (-not $sidExtHex) {
+            throw "Failed to build SID extension"
         }
-        Write-Log "SID hex bytes: $sidHex"
-        
-        # Build the SID extension value
-        # Format: SEQUENCE { OID 1.3.6.1.4.1.311.25.2.1, OCTET STRING containing SID }
-        # The certreq format for this is complex - we use hex encoding
+        Write-Log "SID extension hex: $sidExtHex"
         
         # Create certificate request INF with UPN, Email in SAN, and SID extension
         $inf = @"
@@ -140,10 +178,7 @@ _continue_ = "email=$Email"
 
 ; SID extension for KB5014754 Strong Certificate Mapping
 ; OID 1.3.6.1.4.1.311.25.2 = szOID_NTDS_CA_SECURITY_EXT
-1.3.6.1.4.1.311.25.2 = "{text}"
-_continue_ = "tag=04"
-_continue_ = "oid=1.3.6.1.4.1.311.25.2.1&"
-_continue_ = "tag=04&hex=$($sidHex -replace ' ','')"
+1.3.6.1.4.1.311.25.2 = "{hex}$sidExtHex"
 
 [RequestAttributes]
 CertificateTemplate = $CertTemplate
