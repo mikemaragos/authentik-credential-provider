@@ -106,9 +106,11 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
     pfxBlob.cbData = (DWORD)pfxData.size();
     pfxBlob.pbData = (BYTE*)pfxData.data();
 
-    // Import PFX to a temporary certificate store
-    // CRYPT_EXPORTABLE: Allow key to be exported later
-    // CRYPT_USER_KEYSET: Store key in user's key container (required for access)
+    // NEW APPROACH: Import directly to Windows certificate store
+    // TPM VSCs cannot accept imported private keys - keys must be generated ON the TPM
+    // For now, we'll import to the software-based personal store and attempt PKINIT
+    
+    // Import PFX to user's personal certificate store (MY)
     DWORD dwFlags = CRYPT_EXPORTABLE | CRYPT_USER_KEYSET;
     
     LOG("Attempting PFXImportCertStore with flags=0x%08x", dwFlags);
@@ -147,96 +149,9 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
         LOG("Certificate thumbprint: %S", result.thumbprint.c_str());
     }
 
-    // Now we need to re-import the certificate with the key going to the smart card
-    // This is the tricky part - we need to use NCrypt to specify the smart card provider
-
-    // Get the private key from the PFX
-    DWORD dwKeySpec = 0;
-    BOOL fCallerFreeProvOrNCryptKey = FALSE;
-    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE hKey = 0;
-
-    // Try with CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG first
-    if (!CryptAcquireCertificatePrivateKey(
-        pCert,
-        CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG | CRYPT_ACQUIRE_SILENT_FLAG,
-        nullptr,
-        &hKey,
-        &dwKeySpec,
-        &fCallerFreeProvOrNCryptKey))
-    {
-        DWORD error = GetLastError();
-        LOG("CryptAcquireCertificatePrivateKey (NCrypt) failed: 0x%08x (%d)", error, error);
-        
-        // Try again without NCrypt flag (legacy mode)
-        if (!CryptAcquireCertificatePrivateKey(
-            pCert,
-            CRYPT_ACQUIRE_SILENT_FLAG,
-            nullptr,
-            &hKey,
-            &dwKeySpec,
-            &fCallerFreeProvOrNCryptKey))
-        {
-            error = GetLastError();
-            LOG("CryptAcquireCertificatePrivateKey (CAPI) also failed: 0x%08x (%d)", error, error);
-            CertFreeCertificateContext(pCert);
-            CertCloseStore(hPfxStore, 0);
-            result.message = L"Failed to get private key from PFX";
-            return result;
-        }
-        LOG("Got legacy CAPI private key");
-    }
-
-    LOG("Got private key from PFX, KeySpec=%d, IsNCrypt=%d", dwKeySpec, (dwKeySpec == CERT_NCRYPT_KEY_SPEC));
-
-    // Export the private key blob if using CryptoAPI
-    std::vector<BYTE> keyBlob;
-    NCRYPT_KEY_HANDLE hNCryptKey = 0;
-
-    if (dwKeySpec == CERT_NCRYPT_KEY_SPEC)
-    {
-        hNCryptKey = hKey;
-    }
-    else
-    {
-        // Legacy CryptoAPI key - need to export and re-import to smart card
-        // This is complex, let's try a different approach using certutil command
-        LOG("Legacy CAPI key detected, will use alternative import method");
-    }
-
-    // Open the smart card key storage provider
-    NCRYPT_PROV_HANDLE hProv = 0;
-    SECURITY_STATUS status = NCryptOpenStorageProvider(
-        &hProv,
-        MS_SMART_CARD_KEY_STORAGE_PROVIDER,
-        0);
-
-    if (status != ERROR_SUCCESS)
-    {
-        LOG("NCryptOpenStorageProvider failed: 0x%08x", status);
-        if (fCallerFreeProvOrNCryptKey && hKey)
-        {
-            if (dwKeySpec == CERT_NCRYPT_KEY_SPEC)
-                NCryptFreeObject(hKey);
-            else
-                CryptReleaseContext(hKey, 0);
-        }
-        CertFreeCertificateContext(pCert);
-        CertCloseStore(hPfxStore, 0);
-        result.message = L"Failed to open smart card provider";
-        return result;
-    }
-
-    LOG("Smart card provider opened");
-
-    // For simplicity, we'll add the certificate to the MY store
-    // The private key should already be associated if the PFX was properly created
-    // But for smart card, we typically need the key ON the card
-
-    // Alternative approach: Use CertAddCertificateContextToStore to add to MY store
-    // and rely on the smart card key being properly linked
-
+    // Open the user's personal certificate store (MY)
     HCERTSTORE hMyStore = CertOpenStore(
-        CERT_STORE_PROV_SYSTEM_W,
+        CERT_STORE_PROV_SYSTEM,
         0,
         0,
         CERT_SYSTEM_STORE_CURRENT_USER,
@@ -244,67 +159,41 @@ VSCResult SmartCardHelper::ImportCertificateToVSC(
 
     if (!hMyStore)
     {
-        LOG("Failed to open MY store: %d", GetLastError());
-        NCryptFreeObject(hProv);
-        if (fCallerFreeProvOrNCryptKey && hKey)
-        {
-            if (dwKeySpec == CERT_NCRYPT_KEY_SPEC)
-                NCryptFreeObject(hKey);
-            else
-                CryptReleaseContext(hKey, 0);
-        }
+        DWORD error = GetLastError();
+        LOG("Failed to open MY store: %d", error);
         CertFreeCertificateContext(pCert);
         CertCloseStore(hPfxStore, 0);
         result.message = L"Failed to open certificate store";
         return result;
     }
 
-    // Add certificate to MY store
-    PCCERT_CONTEXT pNewCert = nullptr;
+    // Add certificate (with its private key) to MY store
     if (!CertAddCertificateContextToStore(
         hMyStore,
         pCert,
         CERT_STORE_ADD_REPLACE_EXISTING,
-        &pNewCert))
+        nullptr))
     {
         DWORD error = GetLastError();
-        LOG("CertAddCertificateContextToStore failed: %d", error);
+        LOG("Failed to add certificate to MY store: %d", error);
         CertCloseStore(hMyStore, 0);
-        NCryptFreeObject(hProv);
-        if (fCallerFreeProvOrNCryptKey && hKey)
-        {
-            if (dwKeySpec == CERT_NCRYPT_KEY_SPEC)
-                NCryptFreeObject(hKey);
-            else
-                CryptReleaseContext(hKey, 0);
-        }
         CertFreeCertificateContext(pCert);
         CertCloseStore(hPfxStore, 0);
-        result.message = L"Failed to add certificate to store";
+        result.message = L"Failed to install certificate";
         return result;
     }
 
-    LOG("Certificate added to MY store");
+    LOG("Certificate added to MY store successfully");
 
     // Clean up
-    if (pNewCert)
-        CertFreeCertificateContext(pNewCert);
     CertCloseStore(hMyStore, 0);
-    NCryptFreeObject(hProv);
-    if (fCallerFreeProvOrNCryptKey && hKey)
-    {
-        if (dwKeySpec == CERT_NCRYPT_KEY_SPEC)
-            NCryptFreeObject(hKey);
-        else
-            CryptReleaseContext(hKey, 0);
-    }
     CertFreeCertificateContext(pCert);
     CertCloseStore(hPfxStore, 0);
 
     result.success = true;
-    result.message = L"Certificate imported successfully";
-    LOG("Certificate import completed");
-
+    result.message = L"Certificate installed to personal store";
+    
+    LOG("ImportCertificateToVSC completed successfully (using software store)");
     return result;
 }
 
