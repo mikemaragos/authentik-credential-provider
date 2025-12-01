@@ -4,6 +4,7 @@
 #include "SmartCardHelper.h"
 #include "Logger.h"
 #include <winscard.h>
+#include <wincrypt.h>
 #include <ncrypt.h>
 #include <vector>
 #include <algorithm>
@@ -11,6 +12,19 @@
 #pragma comment(lib, "winscard.lib")
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "crypt32.lib")
+
+// Define PKCS12 flags if not already defined (older SDK versions)
+#ifndef PKCS12_ALLOW_EXPORT_KEY
+#define PKCS12_ALLOW_EXPORT_KEY         0x00000004
+#endif
+
+#ifndef PKCS12_INCLUDE_EXTENDED_PROPERTIES
+#define PKCS12_INCLUDE_EXTENDED_PROPERTIES  0x00000010
+#endif
+
+#ifndef PKCS12_ALLOW_OVERWRITE_KEY
+#define PKCS12_ALLOW_OVERWRITE_KEY      0x00004000
+#endif
 
 // Constructor
 SmartCardHelper::SmartCardHelper() :
