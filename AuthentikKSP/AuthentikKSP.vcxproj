@@ -98,6 +98,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AuthentikKSP.h" />
+    <ClInclude Include="KSPInterface.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="AuthentikKSP.def" />
