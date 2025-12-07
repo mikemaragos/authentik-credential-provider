@@ -14,21 +14,21 @@
 #pragma comment(lib, "winhttp.lib")
 
 // ============================================================================
-// Logging (Debug)
+// Logging (Enable for all builds during development)
 // ============================================================================
 
-#ifdef _DEBUG
-#define LOG(fmt, ...) OutputDebugStringA("[AuthentikKSP] " fmt "\n")
-#else
-#define LOG(fmt, ...) ((void)0)
-#endif
+#define LOG(fmt, ...) do { \
+    char _buf[512]; \
+    sprintf_s(_buf, sizeof(_buf), "[AuthentikKSP] " fmt "\n", __VA_ARGS__); \
+    OutputDebugStringA(_buf); \
+} while(0)
 
 // ============================================================================
 // KSP Function Table
 // ============================================================================
 
 NCRYPT_KEY_STORAGE_FUNCTION_TABLE g_AuthentikKSPFunctionTable = {
-    NCRYPT_KEY_STORAGE_INTERFACE_VERSION,
+    sizeof(NCRYPT_KEY_STORAGE_FUNCTION_TABLE),  // cbSize - MUST be size of structure
     KSPOpenProvider,
     KSPOpenKey,
     KSPCreatePersistedKey,
