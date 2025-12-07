@@ -8,6 +8,8 @@
 #include <winhttp.h>
 #include <sstream>
 #include <vector>
+#include <cstdio>
+#include <cstdarg>
 
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "bcrypt.lib")
@@ -17,11 +19,16 @@
 // Logging (Enable for all builds during development)
 // ============================================================================
 
-#define LOG(fmt, ...) do { \
-    char _buf[512]; \
-    sprintf_s(_buf, sizeof(_buf), "[AuthentikKSP] " fmt "\n", __VA_ARGS__); \
-    OutputDebugStringA(_buf); \
-} while(0)
+inline void KSPLog(const char* fmt, ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    OutputDebugStringA(buf);
+}
+
+#define LOG(fmt, ...) KSPLog("[AuthentikKSP] " fmt "\n", ##__VA_ARGS__)
 
 // ============================================================================
 // KSP Function Table
