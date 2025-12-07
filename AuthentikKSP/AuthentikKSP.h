@@ -6,10 +6,14 @@
 
 #pragma once
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
 #include <ncrypt.h>
+
+// C++ headers
 #include <string>
+#include <new>
 
 // KSP Provider name
 #define AUTHENTIK_KSP_PROVIDER_NAME L"Authentik Key Storage Provider"
