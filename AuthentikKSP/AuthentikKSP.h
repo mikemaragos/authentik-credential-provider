@@ -15,6 +15,9 @@
 #include <string>
 #include <new>
 
+// KSP Interface definitions (normally from CPDK)
+#include "KSPInterface.h"
+
 // KSP Provider name
 #define AUTHENTIK_KSP_PROVIDER_NAME L"Authentik Key Storage Provider"
 
