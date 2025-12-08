@@ -4,11 +4,14 @@
 
 #include <windows.h>
 #include <unknwn.h>
+#include <shlwapi.h>
 #include <credentialprovider.h>
 #include <strsafe.h>
 #include "AuthentikCredentialProvider.h"
 #include "Logger.h"
 #include "guid.h"
+
+#pragma comment(lib, "shlwapi.lib")
 
 // Global DLL instance handle
 HINSTANCE g_hinst = nullptr;
