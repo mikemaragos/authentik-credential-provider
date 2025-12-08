@@ -5,6 +5,7 @@
 
 #include "CredentialPacking.h"
 #include "Logger.h"
+#include <strsafe.h>
 
 #pragma comment(lib, "Secur32.lib")
 #pragma comment(lib, "Advapi32.lib")
@@ -33,7 +34,7 @@ static void InitUnicodeStringRelative(
     }
 }
 
-// Build KERB_SMARTCARD_CSP_INFO structure
+// Build MY_KERB_SMARTCARD_CSP_INFO structure
 HRESULT BuildSmartCardCspInfo(
     const VSCInfo& vscInfo,
     BYTE** ppCspInfo,
@@ -56,7 +57,7 @@ HRESULT BuildSmartCardCspInfo(
 
     // Calculate total size: structure header + all strings
     // Note: bBuffer[1] is already counted in sizeof, so subtract sizeof(WCHAR)
-    DWORD cbHeader = sizeof(KERB_SMARTCARD_CSP_INFO) - sizeof(WCHAR);
+    DWORD cbHeader = sizeof(MY_KERB_SMARTCARD_CSP_INFO) - sizeof(WCHAR);
     DWORD cbTotal = cbHeader + cbCardName + cbReaderName + cbContainerName + cbCspName;
 
     LOG("CSP Info sizes: header=%d, card=%d, reader=%d, container=%d, csp=%d, total=%d",
@@ -73,7 +74,7 @@ HRESULT BuildSmartCardCspInfo(
     ZeroMemory(pBuffer, cbTotal);
 
     // Cast to structure
-    KERB_SMARTCARD_CSP_INFO* pCspInfo = (KERB_SMARTCARD_CSP_INFO*)pBuffer;
+    MY_KERB_SMARTCARD_CSP_INFO* pCspInfo = (MY_KERB_SMARTCARD_CSP_INFO*)pBuffer;
 
     // Fill header
     pCspInfo->dwCspInfoLen = cbTotal;
@@ -158,10 +159,10 @@ HRESULT PackKerbCertificateLogon(
     DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
 
     // Total size: structure + strings + CSP info
-    DWORD cbTotal = sizeof(KERB_CERTIFICATE_LOGON) + cbDomain + cbUsername + cbPin + cbCspInfo;
+    DWORD cbTotal = sizeof(MY_KERB_CERTIFICATE_LOGON) + cbDomain + cbUsername + cbPin + cbCspInfo;
 
     LOG("Package sizes: struct=%d, domain=%d, user=%d, pin=%d, csp=%d, total=%d",
-        (DWORD)sizeof(KERB_CERTIFICATE_LOGON), cbDomain, cbUsername, cbPin, cbCspInfo, cbTotal);
+        (DWORD)sizeof(MY_KERB_CERTIFICATE_LOGON), cbDomain, cbUsername, cbPin, cbCspInfo, cbTotal);
 
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
@@ -175,14 +176,14 @@ HRESULT PackKerbCertificateLogon(
     ZeroMemory(pBuffer, cbTotal);
 
     // Cast to structure
-    KERB_CERTIFICATE_LOGON* pLogon = (KERB_CERTIFICATE_LOGON*)pBuffer;
+    MY_KERB_CERTIFICATE_LOGON* pLogon = (MY_KERB_CERTIFICATE_LOGON*)pBuffer;
 
     // Set message type
     pLogon->MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbCertificateLogon;
     pLogon->Flags = 0;
 
     // String buffer starts after structure
-    BYTE* pStringBuffer = pBuffer + sizeof(KERB_CERTIFICATE_LOGON);
+    BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_CERTIFICATE_LOGON);
 
     // Copy domain name
     memcpy(pStringBuffer, domain.c_str(), cbDomain);
@@ -252,10 +253,10 @@ HRESULT PackKerbCertificateUnlockLogon(
     DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
 
     // Total size: structure + strings + CSP info
-    DWORD cbTotal = sizeof(KERB_CERTIFICATE_UNLOCK_LOGON) + cbDomain + cbUsername + cbPin + cbCspInfo;
+    DWORD cbTotal = sizeof(MY_KERB_CERTIFICATE_UNLOCK_LOGON) + cbDomain + cbUsername + cbPin + cbCspInfo;
 
     LOG("Unlock package sizes: struct=%d, total=%d", 
-        (DWORD)sizeof(KERB_CERTIFICATE_UNLOCK_LOGON), cbTotal);
+        (DWORD)sizeof(MY_KERB_CERTIFICATE_UNLOCK_LOGON), cbTotal);
 
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
@@ -269,7 +270,7 @@ HRESULT PackKerbCertificateUnlockLogon(
     ZeroMemory(pBuffer, cbTotal);
 
     // Cast to structure
-    KERB_CERTIFICATE_UNLOCK_LOGON* pUnlock = (KERB_CERTIFICATE_UNLOCK_LOGON*)pBuffer;
+    MY_KERB_CERTIFICATE_UNLOCK_LOGON* pUnlock = (MY_KERB_CERTIFICATE_UNLOCK_LOGON*)pBuffer;
 
     // Set message type for unlock
     pUnlock->Logon.MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbCertificateUnlockLogon;
@@ -280,7 +281,7 @@ HRESULT PackKerbCertificateUnlockLogon(
     pUnlock->LogonId.HighPart = 0;
 
     // String buffer starts after structure
-    BYTE* pStringBuffer = pBuffer + sizeof(KERB_CERTIFICATE_UNLOCK_LOGON);
+    BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_CERTIFICATE_UNLOCK_LOGON);
 
     // Copy domain name
     memcpy(pStringBuffer, domain.c_str(), cbDomain);
