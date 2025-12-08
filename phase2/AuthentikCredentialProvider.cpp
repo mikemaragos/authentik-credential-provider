@@ -7,8 +7,15 @@
 #include "Logger.h"
 #include "guid.h"
 #include <shlwapi.h>
+#include <new>
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "secur32.lib")
+
+// NT_SUCCESS macro
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
 
 #define NEGOSSP_NAME_A "Negotiate"
 
