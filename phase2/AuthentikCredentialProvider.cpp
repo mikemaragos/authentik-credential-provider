@@ -18,6 +18,7 @@
 #endif
 
 #define NEGOSSP_NAME_A "Negotiate"
+#define MICROSOFT_KERBEROS_NAME_A "Kerberos"
 
 // Constructor
 CAuthentikProvider::CAuthentikProvider() :
@@ -225,7 +226,9 @@ HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
     NTSTATUS status = LsaConnectUntrusted(&hLsa);
     if (NT_SUCCESS(status))
     {
-        packageName.Buffer = (PCHAR)NEGOSSP_NAME_A;
+        // Use Kerberos package directly for PKINIT/certificate logon
+        // NEGOSSP would try to negotiate and might not properly handle KERB_CERTIFICATE_LOGON
+        packageName.Buffer = (PCHAR)MICROSOFT_KERBEROS_NAME_A;
         packageName.Length = (USHORT)strlen(packageName.Buffer);
         packageName.MaximumLength = packageName.Length;
 
@@ -236,7 +239,7 @@ HRESULT CAuthentikProvider::_GetAuthenticationPackageId()
         {
             _ulAuthPackage = ulAuthPackage;
             hr = S_OK;
-            LOG("Authentication package ID: %d", ulAuthPackage);
+            LOG("Kerberos authentication package ID: %d", ulAuthPackage);
         }
         else
         {
