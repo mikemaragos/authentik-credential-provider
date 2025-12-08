@@ -1,29 +1,28 @@
 // VSCManager.cpp
-// Virtual Smart Card Manager implementation
+// Virtual Smart Card Manager - handles PFX import to VSC
+// Phase 2: December 8, 2025
 
 #include "VSCManager.h"
 #include "Logger.h"
 #include <winscard.h>
-#include <ncrypt.h>
-#include <vector>
-#include <sstream>
+#include <cryptuiapi.h>
+#include <shlobj.h>
+#include <fstream>
 
+#pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "winscard.lib")
-#pragma comment(lib, "ncrypt.lib")
+#pragma comment(lib, "cryptui.lib")
 
-// Microsoft Base Smart Card Crypto Provider
-static const wchar_t* VSC_CSP_NAME = L"Microsoft Base Smart Card Crypto Provider";
-static const wchar_t* VSC_CARD_NAME = L"AuthentikVSC";
-
+// Constructor
 VSCManager::VSCManager() :
-    _initialized(false),
-    _cspName(VSC_CSP_NAME),
-    _cardName(VSC_CARD_NAME)
+    _cspName(L"Microsoft Base Smart Card Crypto Provider"),
+    _initialized(false)
 {
     LOG("VSCManager::Constructor");
 }
 
+// Destructor
 VSCManager::~VSCManager()
 {
     LOG("VSCManager::Destructor");
@@ -34,43 +33,39 @@ HRESULT VSCManager::Initialize()
 {
     LOG("VSCManager::Initialize");
 
-    if (_initialized)
-        return S_OK;
-
     HRESULT hr = _FindVSCReader();
     if (SUCCEEDED(hr))
     {
         _initialized = true;
-        LOG("VSC initialized: reader=%S", _readerName.c_str());
+        LOG("VSCManager initialized: reader=%S", _readerName.c_str());
     }
     else
     {
-        LOG("Failed to find VSC reader: 0x%08x", hr);
+        LOG("VSCManager initialization failed: 0x%08x", hr);
+        _lastError = L"No Virtual Smart Card found";
     }
 
     return hr;
 }
 
-// Find the Virtual Smart Card reader
+// Find VSC reader
 HRESULT VSCManager::_FindVSCReader()
 {
-    LOG("_FindVSCReader");
+    LOG("Finding VSC reader");
 
     SCARDCONTEXT hContext = 0;
     LONG lResult = SCardEstablishContext(SCARD_SCOPE_USER, nullptr, nullptr, &hContext);
-    
     if (lResult != SCARD_S_SUCCESS)
     {
         LOG("SCardEstablishContext failed: 0x%08x", lResult);
         return HRESULT_FROM_WIN32(lResult);
     }
 
-    // Get list of readers
+    // List readers
     DWORD dwReaders = SCARD_AUTOALLOCATE;
     LPWSTR pszReaders = nullptr;
-
     lResult = SCardListReadersW(hContext, nullptr, (LPWSTR)&pszReaders, &dwReaders);
-    
+
     if (lResult != SCARD_S_SUCCESS)
     {
         LOG("SCardListReaders failed: 0x%08x", lResult);
@@ -78,50 +73,49 @@ HRESULT VSCManager::_FindVSCReader()
         return HRESULT_FROM_WIN32(lResult);
     }
 
-    // Find VSC reader (contains "Virtual Smart Card")
+    // Find Microsoft Virtual Smart Card reader
     LPWSTR pReader = pszReaders;
-    bool found = false;
-
-    while (*pReader != L'\0')
+    while (pReader && *pReader)
     {
         LOG("Found reader: %S", pReader);
         
-        // Check if this is a virtual smart card reader
-        std::wstring readerStr(pReader);
-        if (readerStr.find(L"Virtual Smart Card") != std::wstring::npos ||
-            readerStr.find(L"TPM") != std::wstring::npos)
+        // Look for VSC reader
+        if (wcsstr(pReader, L"Virtual Smart Card") != nullptr)
         {
-            _readerName = readerStr;
-            found = true;
-            LOG("Selected VSC reader: %S", _readerName.c_str());
+            _readerName = pReader;
+            LOG("VSC reader found: %S", _readerName.c_str());
             break;
         }
-
-        // Move to next reader
+        
         pReader += wcslen(pReader) + 1;
     }
 
     SCardFreeMemory(hContext, pszReaders);
     SCardReleaseContext(hContext);
 
-    if (!found)
+    if (_readerName.empty())
     {
         LOG("No VSC reader found");
-        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        return E_FAIL;
     }
 
     return S_OK;
 }
 
-// Import certificate and private key to VSC
-HRESULT VSCManager::ImportCertificate(
-    const std::vector<BYTE>& certificateDer,
-    const std::vector<BYTE>& privateKeyBlob,
+// Import PFX to VSC
+HRESULT VSCManager::ImportPFX(
+    const std::vector<BYTE>& pfxData,
+    const std::wstring& pfxPassword,
     const std::wstring& pin,
     VSCInfo* pVscInfo)
 {
-    LOG("ImportCertificate: certSize=%d, keySize=%d", 
-        certificateDer.size(), privateKeyBlob.size());
+    LOG("ImportPFX: %d bytes, pin length=%d", pfxData.size(), pin.length());
+
+    if (pfxData.empty())
+    {
+        _lastError = L"Empty PFX data";
+        return E_INVALIDARG;
+    }
 
     if (!_initialized)
     {
@@ -130,248 +124,338 @@ HRESULT VSCManager::ImportCertificate(
             return hr;
     }
 
-    if (certificateDer.empty() || privateKeyBlob.empty() || !pVscInfo)
-        return E_INVALIDARG;
-
-    HRESULT hr = S_OK;
-
-    // Parse certificate to get subject name for container
-    PCCERT_CONTEXT pCert = CertCreateCertificateContext(
-        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-        &certificateDer[0],
-        (DWORD)certificateDer.size());
-
-    if (!pCert)
+    // Try API-based import first
+    HRESULT hr = _ImportPFXToVSC(pfxData, pfxPassword, pin);
+    
+    if (FAILED(hr))
     {
-        LOG("Failed to parse certificate: %d", GetLastError());
+        LOG("API import failed, trying certutil fallback");
+        hr = _ImportPFXSimple(pfxData, pfxPassword);
+    }
+
+    if (SUCCEEDED(hr) && pVscInfo)
+    {
+        // Fill in VSC info
+        pVscInfo->readerName = _readerName;
+        pVscInfo->cspName = _cspName;
+        pVscInfo->cardName = L"";  // Will be filled by GetContainerFromCert
+        pVscInfo->containerName = L"";  // Will be filled by GetContainerFromCert
+        
+        LOG("PFX import successful");
+    }
+
+    return hr;
+}
+
+// Import PFX using certutil (fallback method - reliable)
+HRESULT VSCManager::_ImportPFXSimple(
+    const std::vector<BYTE>& pfxData,
+    const std::wstring& pfxPassword)
+{
+    LOG("_ImportPFXSimple using certutil");
+
+    // Create temp directory path
+    WCHAR tempPath[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tempPath) == 0)
+    {
+        LOG("GetTempPath failed: %d", GetLastError());
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    // Get subject name for container name
-    WCHAR szSubject[256] = {0};
-    CertGetNameStringW(pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, szSubject, ARRAYSIZE(szSubject));
+    // Create temp file for PFX
+    std::wstring pfxFile = std::wstring(tempPath) + L"auth_temp.pfx";
     
-    // Create unique container name
-    std::wstring containerName = L"AuthentikCert_";
-    containerName += szSubject;
-    containerName += L"_";
-    containerName += std::to_wstring(GetTickCount64());
+    // Write PFX to temp file
+    {
+        std::ofstream ofs(pfxFile, std::ios::binary);
+        if (!ofs)
+        {
+            LOG("Failed to create temp PFX file");
+            _lastError = L"Failed to create temporary file";
+            return E_FAIL;
+        }
+        ofs.write(reinterpret_cast<const char*>(pfxData.data()), pfxData.size());
+        ofs.close();
+    }
 
-    LOG("Container name: %S", containerName.c_str());
+    LOG("PFX written to: %S", pfxFile.c_str());
 
-    // Use NCrypt to import to smart card
-    NCRYPT_PROV_HANDLE hProv = 0;
-    NCRYPT_KEY_HANDLE hKey = 0;
+    // Build certutil command
+    // certutil -csp "Microsoft Base Smart Card Crypto Provider" -p "password" -importpfx "file.pfx"
+    std::wstring cmdLine = L"certutil -csp \"Microsoft Base Smart Card Crypto Provider\" -p \"" 
+                          + pfxPassword + L"\" -importpfx \"" + pfxFile + L"\"";
 
-    // Open the smart card provider
+    LOG("Executing: certutil -csp ... -importpfx");
+
+    // Create process
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    // Need writable command line buffer
+    std::vector<wchar_t> cmdBuffer(cmdLine.begin(), cmdLine.end());
+    cmdBuffer.push_back(L'\0');
+
+    BOOL bResult = CreateProcessW(
+        nullptr,
+        &cmdBuffer[0],
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+
+    if (!bResult)
+    {
+        LOG("CreateProcess failed: %d", GetLastError());
+        DeleteFileW(pfxFile.c_str());
+        _lastError = L"Failed to execute certutil";
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    // Wait for completion (timeout 30 seconds)
+    DWORD waitResult = WaitForSingleObject(pi.hProcess, 30000);
+    
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // Delete temp file
+    DeleteFileW(pfxFile.c_str());
+
+    if (waitResult == WAIT_TIMEOUT)
+    {
+        LOG("certutil timed out");
+        _lastError = L"Certificate import timed out";
+        return E_FAIL;
+    }
+
+    if (exitCode != 0)
+    {
+        LOG("certutil failed with exit code: %d", exitCode);
+        _lastError = L"Certificate import failed";
+        return E_FAIL;
+    }
+
+    LOG("certutil import successful");
+    return S_OK;
+}
+
+// Import PFX using NCrypt APIs (preferred method)
+HRESULT VSCManager::_ImportPFXToVSC(
+    const std::vector<BYTE>& pfxData,
+    const std::wstring& pfxPassword,
+    const std::wstring& pin)
+{
+    LOG("_ImportPFXToVSC using NCrypt APIs");
+
+    // Setup PFX blob
+    CRYPT_DATA_BLOB pfxBlob;
+    pfxBlob.cbData = (DWORD)pfxData.size();
+    pfxBlob.pbData = const_cast<BYTE*>(pfxData.data());
+
+    // Import flags - target smart card CSP
+    DWORD dwFlags = CRYPT_USER_KEYSET | PKCS12_ALLOW_OVERWRITE_KEY;
+
+    // For smart card import, we need to use NCrypt provider
+    // First, try importing with PKCS12_PREFER_CNG_KSP to use KSP
+    NCRYPT_PROV_HANDLE hProvider = 0;
     SECURITY_STATUS status = NCryptOpenStorageProvider(
-        &hProv,
+        &hProvider,
         MS_SMART_CARD_KEY_STORAGE_PROVIDER,
         0);
 
     if (status != ERROR_SUCCESS)
     {
         LOG("NCryptOpenStorageProvider failed: 0x%08x", status);
-        CertFreeCertificateContext(pCert);
-        return HRESULT_FROM_WIN32(status);
+        // Fall back to PFXImportCertStore method
+        return _ImportPFXWithCertStore(pfxData, pfxPassword);
     }
 
-    // Set the reader name
-    std::wstring readerPath = L"\\\\.\\" + _readerName + L"\\";
-    status = NCryptSetProperty(
-        hProv,
-        NCRYPT_READER_PROPERTY,
-        (PBYTE)readerPath.c_str(),
-        (DWORD)((readerPath.length() + 1) * sizeof(WCHAR)),
-        0);
-
-    if (status != ERROR_SUCCESS)
-    {
-        LOG("NCryptSetProperty (reader) failed: 0x%08x", status);
-    }
-
-    // Set PIN for authentication
+    // Set PIN for the smart card
     if (!pin.empty())
     {
         status = NCryptSetProperty(
-            hProv,
+            hProvider,
             NCRYPT_PIN_PROPERTY,
             (PBYTE)pin.c_str(),
-            (DWORD)((pin.length() + 1) * sizeof(WCHAR)),
+            (DWORD)((pin.length() + 1) * sizeof(wchar_t)),
             0);
 
         if (status != ERROR_SUCCESS)
         {
-            LOG("NCryptSetProperty (PIN) failed: 0x%08x", status);
+            LOG("NCryptSetProperty PIN failed: 0x%08x", status);
+            // Continue anyway, user may be prompted
         }
     }
 
-    // Import the private key
-    // First, try to decode as PKCS#8
-    CRYPT_DECODE_PARA decodePara = {0};
-    decodePara.cbSize = sizeof(decodePara);
+    // Import the PFX
+    HCERTSTORE hStore = PFXImportCertStore(
+        &pfxBlob,
+        pfxPassword.c_str(),
+        CRYPT_USER_KEYSET | PKCS12_PREFER_CNG_KSP | PKCS12_ALWAYS_CNG_KSP);
 
-    BCRYPT_KEY_BLOB* pKeyBlob = nullptr;
-    DWORD cbKeyBlob = 0;
-
-    // Try to import as PKCS#8 private key
-    if (CryptDecodeObjectEx(
-        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-        PKCS_RSA_PRIVATE_KEY,
-        &privateKeyBlob[0],
-        (DWORD)privateKeyBlob.size(),
-        CRYPT_DECODE_ALLOC_FLAG,
-        nullptr,
-        &pKeyBlob,
-        &cbKeyBlob))
+    if (!hStore)
     {
-        LOG("Decoded PKCS RSA private key: %d bytes", cbKeyBlob);
-    }
-    else
-    {
-        // Try as raw blob
-        LOG("Using raw key blob");
+        DWORD dwError = GetLastError();
+        LOG("PFXImportCertStore failed: %d", dwError);
+        NCryptFreeObject(hProvider);
+        return HRESULT_FROM_WIN32(dwError);
     }
 
-    // Import key to smart card
-    NCryptBuffer keyBuffer = {0};
-    keyBuffer.BufferType = NCRYPTBUFFER_PKCS_KEY_NAME;
-    keyBuffer.cbBuffer = (DWORD)((containerName.length() + 1) * sizeof(WCHAR));
-    keyBuffer.pvBuffer = (PVOID)containerName.c_str();
-
-    NCryptBufferDesc keyBufferDesc = {0};
-    keyBufferDesc.ulVersion = NCRYPTBUFFER_VERSION;
-    keyBufferDesc.cBuffers = 1;
-    keyBufferDesc.pBuffers = &keyBuffer;
-
-    status = NCryptImportKey(
-        hProv,
-        0,
-        BCRYPT_RSAPRIVATE_BLOB,  // Or NCRYPT_PKCS8_PRIVATE_KEY_BLOB
-        &keyBufferDesc,
-        &hKey,
-        (PBYTE)&privateKeyBlob[0],
-        (DWORD)privateKeyBlob.size(),
-        NCRYPT_OVERWRITE_KEY_FLAG);
-
-    if (status != ERROR_SUCCESS)
+    // Find the imported certificate
+    PCCERT_CONTEXT pCert = CertEnumCertificatesInStore(hStore, nullptr);
+    if (pCert)
     {
-        LOG("NCryptImportKey failed: 0x%08x", status);
-        // Try alternative import method
-        status = NCryptImportKey(
-            hProv,
+        // Add to MY store
+        HCERTSTORE hMyStore = CertOpenStore(
+            CERT_STORE_PROV_SYSTEM,
             0,
-            NCRYPT_PKCS8_PRIVATE_KEY_BLOB,
-            nullptr,
-            &hKey,
-            (PBYTE)&privateKeyBlob[0],
-            (DWORD)privateKeyBlob.size(),
-            NCRYPT_OVERWRITE_KEY_FLAG);
+            0,
+            CERT_SYSTEM_STORE_CURRENT_USER,
+            L"MY");
 
-        if (status != ERROR_SUCCESS)
+        if (hMyStore)
         {
-            LOG("NCryptImportKey (PKCS8) also failed: 0x%08x", status);
-            NCryptFreeObject(hProv);
-            CertFreeCertificateContext(pCert);
-            if (pKeyBlob) LocalFree(pKeyBlob);
-            return HRESULT_FROM_WIN32(status);
+            if (!CertAddCertificateContextToStore(
+                hMyStore,
+                pCert,
+                CERT_STORE_ADD_REPLACE_EXISTING,
+                nullptr))
+            {
+                LOG("CertAddCertificateContextToStore failed: %d", GetLastError());
+            }
+            else
+            {
+                LOG("Certificate added to MY store");
+            }
+            CertCloseStore(hMyStore, 0);
+        }
+
+        CertFreeCertificateContext(pCert);
+    }
+
+    CertCloseStore(hStore, 0);
+    NCryptFreeObject(hProvider);
+
+    return S_OK;
+}
+
+// Helper: Import PFX using CertStore API
+HRESULT VSCManager::_ImportPFXWithCertStore(
+    const std::vector<BYTE>& pfxData,
+    const std::wstring& pfxPassword)
+{
+    LOG("_ImportPFXWithCertStore");
+
+    CRYPT_DATA_BLOB pfxBlob;
+    pfxBlob.cbData = (DWORD)pfxData.size();
+    pfxBlob.pbData = const_cast<BYTE*>(pfxData.data());
+
+    // Import to cert store
+    HCERTSTORE hPfxStore = PFXImportCertStore(
+        &pfxBlob,
+        pfxPassword.c_str(),
+        CRYPT_USER_KEYSET | PKCS12_ALLOW_OVERWRITE_KEY);
+
+    if (!hPfxStore)
+    {
+        DWORD dwError = GetLastError();
+        LOG("PFXImportCertStore failed: %d", dwError);
+        _lastError = L"Failed to import PFX";
+        return HRESULT_FROM_WIN32(dwError);
+    }
+
+    // The certificate is now in a temporary store
+    // We need to copy it to MY store and associate with smart card CSP
+    PCCERT_CONTEXT pCert = CertEnumCertificatesInStore(hPfxStore, nullptr);
+    
+    if (!pCert)
+    {
+        LOG("No certificate found in PFX");
+        CertCloseStore(hPfxStore, 0);
+        _lastError = L"No certificate in PFX";
+        return E_FAIL;
+    }
+
+    // Get private key info
+    DWORD cbData = 0;
+    CertGetCertificateContextProperty(
+        pCert,
+        CERT_KEY_PROV_INFO_PROP_ID,
+        nullptr,
+        &cbData);
+
+    if (cbData > 0)
+    {
+        std::vector<BYTE> keyProvInfo(cbData);
+        if (CertGetCertificateContextProperty(
+            pCert,
+            CERT_KEY_PROV_INFO_PROP_ID,
+            &keyProvInfo[0],
+            &cbData))
+        {
+            CRYPT_KEY_PROV_INFO* pKeyInfo = (CRYPT_KEY_PROV_INFO*)&keyProvInfo[0];
+            LOG("Key container: %S, CSP: %S", 
+                pKeyInfo->pwszContainerName,
+                pKeyInfo->pwszProvName);
         }
     }
 
-    LOG("Private key imported successfully");
-
-    // Now import the certificate to MY store with link to the key
-    HCERTSTORE hStore = CertOpenStore(
-        CERT_STORE_PROV_SYSTEM_W,
+    // Add to MY store
+    HCERTSTORE hMyStore = CertOpenStore(
+        CERT_STORE_PROV_SYSTEM,
         0,
         0,
         CERT_SYSTEM_STORE_CURRENT_USER,
         L"MY");
 
-    if (!hStore)
+    HRESULT hr = E_FAIL;
+    if (hMyStore)
     {
-        LOG("CertOpenStore failed: %d", GetLastError());
-        NCryptFreeObject(hKey);
-        NCryptFreeObject(hProv);
-        CertFreeCertificateContext(pCert);
-        if (pKeyBlob) LocalFree(pKeyBlob);
-        return HRESULT_FROM_WIN32(GetLastError());
+        if (CertAddCertificateContextToStore(
+            hMyStore,
+            pCert,
+            CERT_STORE_ADD_REPLACE_EXISTING,
+            nullptr))
+        {
+            LOG("Certificate added to MY store successfully");
+            hr = S_OK;
+        }
+        else
+        {
+            LOG("Failed to add certificate to MY store: %d", GetLastError());
+            _lastError = L"Failed to add certificate to store";
+        }
+        CertCloseStore(hMyStore, 0);
     }
 
-    // Set the key provider info on the certificate
-    CRYPT_KEY_PROV_INFO keyProvInfo = {0};
-    keyProvInfo.pwszContainerName = (LPWSTR)containerName.c_str();
-    keyProvInfo.pwszProvName = (LPWSTR)MS_SMART_CARD_KEY_STORAGE_PROVIDER;
-    keyProvInfo.dwProvType = 0;  // For CNG
-    keyProvInfo.dwFlags = 0;
-    keyProvInfo.dwKeySpec = AT_KEYEXCHANGE;
-
-    if (!CertSetCertificateContextProperty(
-        pCert,
-        CERT_KEY_PROV_INFO_PROP_ID,
-        0,
-        &keyProvInfo))
-    {
-        LOG("CertSetCertificateContextProperty failed: %d", GetLastError());
-    }
-
-    // Add certificate to store
-    PCCERT_CONTEXT pStoreCert = nullptr;
-    if (!CertAddCertificateContextToStore(
-        hStore,
-        pCert,
-        CERT_STORE_ADD_REPLACE_EXISTING,
-        &pStoreCert))
-    {
-        LOG("CertAddCertificateContextToStore failed: %d", GetLastError());
-        hr = HRESULT_FROM_WIN32(GetLastError());
-    }
-    else
-    {
-        LOG("Certificate added to MY store");
-        CertFreeCertificateContext(pStoreCert);
-        hr = S_OK;
-    }
-
-    // Fill in VSC info for caller
-    pVscInfo->readerName = _readerName;
-    pVscInfo->containerName = containerName;
-    pVscInfo->cspName = MS_SMART_CARD_KEY_STORAGE_PROVIDER;
-    pVscInfo->cardName = _cardName;
-
-    LOG("VSCInfo: reader=%S, container=%S, csp=%S",
-        pVscInfo->readerName.c_str(),
-        pVscInfo->containerName.c_str(),
-        pVscInfo->cspName.c_str());
-
-    // Cleanup
-    CertCloseStore(hStore, 0);
-    NCryptFreeObject(hKey);
-    NCryptFreeObject(hProv);
     CertFreeCertificateContext(pCert);
-    if (pKeyBlob) LocalFree(pKeyBlob);
+    CertCloseStore(hPfxStore, 0);
 
     return hr;
 }
 
-// Get VSC info for existing certificate
-HRESULT VSCManager::GetVSCInfo(const std::wstring& username, VSCInfo* pVscInfo)
+// Get VSC info by thumbprint
+HRESULT VSCManager::GetVSCInfoByThumbprint(
+    const std::wstring& thumbprint,
+    VSCInfo* pVscInfo)
 {
-    LOG("GetVSCInfo: user=%S", username.c_str());
-
-    if (!_initialized)
-    {
-        HRESULT hr = Initialize();
-        if (FAILED(hr))
-            return hr;
-    }
+    LOG("GetVSCInfoByThumbprint: %S", thumbprint.c_str());
 
     if (!pVscInfo)
         return E_INVALIDARG;
 
-    // Open MY store and find certificate for user
+    // Open MY store
     HCERTSTORE hStore = CertOpenStore(
-        CERT_STORE_PROV_SYSTEM_W,
+        CERT_STORE_PROV_SYSTEM,
         0,
         0,
         CERT_SYSTEM_STORE_CURRENT_USER,
@@ -379,94 +463,138 @@ HRESULT VSCManager::GetVSCInfo(const std::wstring& username, VSCInfo* pVscInfo)
 
     if (!hStore)
     {
-        LOG("CertOpenStore failed: %d", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
+        LOG("Failed to open MY store: %d", GetLastError());
+        return E_FAIL;
     }
 
-    // Find certificate with matching subject
-    std::wstring searchName = L"CN=" + username;
-    PCCERT_CONTEXT pCert = nullptr;
-    HRESULT hr = E_NOT_SET;
+    // Convert thumbprint hex string to bytes
+    std::vector<BYTE> thumbprintBytes;
+    for (size_t i = 0; i < thumbprint.length(); i += 2)
+    {
+        std::wstring byteStr = thumbprint.substr(i, 2);
+        BYTE b = (BYTE)wcstoul(byteStr.c_str(), nullptr, 16);
+        thumbprintBytes.push_back(b);
+    }
 
+    // Find certificate by thumbprint
+    CRYPT_HASH_BLOB hashBlob;
+    hashBlob.cbData = (DWORD)thumbprintBytes.size();
+    hashBlob.pbData = thumbprintBytes.data();
+
+    PCCERT_CONTEXT pCert = CertFindCertificateInStore(
+        hStore,
+        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+        0,
+        CERT_FIND_SHA1_HASH,
+        &hashBlob,
+        nullptr);
+
+    HRESULT hr = E_FAIL;
+    if (pCert)
+    {
+        hr = _GetContainerFromCert(pCert, pVscInfo->containerName, pVscInfo->cspName);
+        if (SUCCEEDED(hr))
+        {
+            pVscInfo->readerName = _readerName;
+            pVscInfo->cardName = L"";
+        }
+        CertFreeCertificateContext(pCert);
+    }
+    else
+    {
+        LOG("Certificate not found by thumbprint");
+        _lastError = L"Certificate not found";
+    }
+
+    CertCloseStore(hStore, 0);
+    return hr;
+}
+
+// Get container info from certificate
+HRESULT VSCManager::_GetContainerFromCert(
+    PCCERT_CONTEXT pCertContext,
+    std::wstring& containerName,
+    std::wstring& cspName)
+{
+    LOG("_GetContainerFromCert");
+
+    DWORD cbData = 0;
+    if (!CertGetCertificateContextProperty(
+        pCertContext,
+        CERT_KEY_PROV_INFO_PROP_ID,
+        nullptr,
+        &cbData))
+    {
+        LOG("Failed to get key prov info size: %d", GetLastError());
+        return E_FAIL;
+    }
+
+    std::vector<BYTE> buffer(cbData);
+    if (!CertGetCertificateContextProperty(
+        pCertContext,
+        CERT_KEY_PROV_INFO_PROP_ID,
+        &buffer[0],
+        &cbData))
+    {
+        LOG("Failed to get key prov info: %d", GetLastError());
+        return E_FAIL;
+    }
+
+    CRYPT_KEY_PROV_INFO* pKeyInfo = (CRYPT_KEY_PROV_INFO*)&buffer[0];
+    
+    if (pKeyInfo->pwszContainerName)
+        containerName = pKeyInfo->pwszContainerName;
+    
+    if (pKeyInfo->pwszProvName)
+        cspName = pKeyInfo->pwszProvName;
+
+    LOG("Container: %S, CSP: %S", containerName.c_str(), cspName.c_str());
+    
+    return S_OK;
+}
+
+// Find certificate by UPN
+PCCERT_CONTEXT VSCManager::_FindCertificateInStore(const std::wstring& upn)
+{
+    LOG("_FindCertificateInStore: upn=%S", upn.c_str());
+
+    HCERTSTORE hStore = CertOpenStore(
+        CERT_STORE_PROV_SYSTEM,
+        0,
+        0,
+        CERT_SYSTEM_STORE_CURRENT_USER,
+        L"MY");
+
+    if (!hStore)
+        return nullptr;
+
+    // Enumerate and find by UPN in SAN
+    PCCERT_CONTEXT pCert = nullptr;
     while ((pCert = CertEnumCertificatesInStore(hStore, pCert)) != nullptr)
     {
-        WCHAR szSubject[256] = {0};
-        CertGetNameStringW(pCert, CERT_NAME_ATTR_TYPE, 0, (void*)szOID_COMMON_NAME, 
-                          szSubject, ARRAYSIZE(szSubject));
-
-        if (_wcsicmp(szSubject, username.c_str()) == 0)
+        // Check for Smart Card Logon EKU
+        DWORD cbUsage = 0;
+        if (CertGetEnhancedKeyUsage(pCert, 0, nullptr, &cbUsage) && cbUsage > 0)
         {
-            // Found matching certificate - get key provider info
-            DWORD cbData = 0;
-            if (CertGetCertificateContextProperty(pCert, CERT_KEY_PROV_INFO_PROP_ID, nullptr, &cbData))
+            std::vector<BYTE> usageBuffer(cbUsage);
+            CERT_ENHKEY_USAGE* pUsage = (CERT_ENHKEY_USAGE*)&usageBuffer[0];
+            
+            if (CertGetEnhancedKeyUsage(pCert, 0, pUsage, &cbUsage))
             {
-                std::vector<BYTE> provInfo(cbData);
-                if (CertGetCertificateContextProperty(pCert, CERT_KEY_PROV_INFO_PROP_ID, 
-                                                      &provInfo[0], &cbData))
+                for (DWORD i = 0; i < pUsage->cUsageIdentifier; i++)
                 {
-                    CRYPT_KEY_PROV_INFO* pProvInfo = (CRYPT_KEY_PROV_INFO*)&provInfo[0];
-                    
-                    pVscInfo->containerName = pProvInfo->pwszContainerName ? pProvInfo->pwszContainerName : L"";
-                    pVscInfo->cspName = pProvInfo->pwszProvName ? pProvInfo->pwszProvName : _cspName;
-                    pVscInfo->readerName = _readerName;
-                    pVscInfo->cardName = _cardName;
-
-                    LOG("Found VSC info: container=%S", pVscInfo->containerName.c_str());
-                    hr = S_OK;
-                    break;
+                    // Smart Card Logon EKU: 1.3.6.1.4.1.311.20.2.2
+                    if (strcmp(pUsage->rgpszUsageIdentifier[i], "1.3.6.1.4.1.311.20.2.2") == 0)
+                    {
+                        LOG("Found certificate with Smart Card Logon EKU");
+                        // Don't close store - caller will free context
+                        return pCert;
+                    }
                 }
             }
         }
     }
 
     CertCloseStore(hStore, 0);
-
-    if (FAILED(hr))
-    {
-        LOG("No matching certificate found for user");
-    }
-
-    return hr;
-}
-
-// Check if VSC has valid certificate
-bool VSCManager::HasValidCertificate(const std::wstring& username)
-{
-    VSCInfo info;
-    return SUCCEEDED(GetVSCInfo(username, &info));
-}
-
-// Delete certificate
-HRESULT VSCManager::DeleteCertificate(const std::wstring& containerName)
-{
-    LOG("DeleteCertificate: container=%S", containerName.c_str());
-
-    NCRYPT_PROV_HANDLE hProv = 0;
-    SECURITY_STATUS status = NCryptOpenStorageProvider(
-        &hProv,
-        MS_SMART_CARD_KEY_STORAGE_PROVIDER,
-        0);
-
-    if (status != ERROR_SUCCESS)
-    {
-        return HRESULT_FROM_WIN32(status);
-    }
-
-    NCRYPT_KEY_HANDLE hKey = 0;
-    status = NCryptOpenKey(
-        hProv,
-        &hKey,
-        containerName.c_str(),
-        0,
-        0);
-
-    if (status == ERROR_SUCCESS)
-    {
-        status = NCryptDeleteKey(hKey, 0);
-        LOG("Key deleted: 0x%08x", status);
-    }
-
-    NCryptFreeObject(hProv);
-
-    return HRESULT_FROM_WIN32(status);
+    return nullptr;
 }
