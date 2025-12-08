@@ -1,5 +1,6 @@
 // FieldDescriptors.h
-// Definitions for credential provider fields - Phase 2 (Passwordless)
+// Definitions for credential provider fields - Phase 2 (OTP only, passwordless)
+// December 8, 2025
 
 #pragma once
 
@@ -25,15 +26,15 @@ struct FIELD_STATE_PAIR
     CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE cpfis;
 };
 
-// Field descriptors - No password field
+// Field descriptors - No password field (passwordless!)
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
-    { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                      CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless",    CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Enter username and OTP",    CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",                  CPFG_NONE },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, L"OTP Code",                  CPFG_NONE },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",                   CPFG_NONE },
+    { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                  CPFG_CREDENTIAL_PROVIDER_LOGO },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless", CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Enter username and OTP", CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",              CPFG_NONE },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, L"OTP Code",              CPFG_NONE },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",               CPFG_NONE },
 };
 
 // Initial field state pairs
@@ -53,7 +54,8 @@ inline HRESULT FieldDescriptorCoAllocCopy(
     CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR** ppcpfd)
 {
     HRESULT hr;
-    CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* pcpfd = (CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR*)CoTaskMemAlloc(sizeof(CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR));
+    CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* pcpfd = 
+        (CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR*)CoTaskMemAlloc(sizeof(CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR));
 
     if (pcpfd)
     {
