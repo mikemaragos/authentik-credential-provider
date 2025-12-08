@@ -5,6 +5,7 @@
 
 #include "AuthentikAPI.h"
 #include "Logger.h"
+#include <wincrypt.h>
 #include <sstream>
 #include <algorithm>
 
