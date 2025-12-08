@@ -6,6 +6,9 @@
 #include "AuthentikCredential.h"
 #include "Logger.h"
 #include "guid.h"
+#include <shlwapi.h>
+
+#pragma comment(lib, "shlwapi.lib")
 
 #define NEGOSSP_NAME_A "Negotiate"
 
