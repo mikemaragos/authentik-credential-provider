@@ -5,13 +5,16 @@
 #include <windows.h>
 #include <unknwn.h>
 #include <shlwapi.h>
+#include <objbase.h>
 #include <credentialprovider.h>
 #include <strsafe.h>
+#include <new>
 #include "AuthentikCredentialProvider.h"
 #include "Logger.h"
 #include "guid.h"
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "ole32.lib")
 
 // Global DLL instance handle
 HINSTANCE g_hinst = nullptr;
