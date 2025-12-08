@@ -7,13 +7,10 @@
 #include <windows.h>
 #include <credentialprovider.h>
 #include <shlwapi.h>
+#include <objbase.h>
 
 #pragma comment(lib, "shlwapi.lib")
-
-// Define CPFG_NONE if not defined in SDK
-#ifndef CPFG_NONE
-#define CPFG_NONE GUID_NULL
-#endif
+#pragma comment(lib, "ole32.lib")
 
 // Field IDs - Simplified for passwordless OTP authentication
 enum FIELD_ID
@@ -37,12 +34,12 @@ struct FIELD_STATE_PAIR
 // Field descriptors - No password field (passwordless!)
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
-    { FID_LOGO,       CPFT_TILE_IMAGE,    L"Logo",                  CPFG_CREDENTIAL_PROVIDER_LOGO },
-    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    L"Authentik Passwordless", CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    L"Enter username and OTP", CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     L"Username",              CPFG_NONE },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, L"OTP Code",              CPFG_NONE },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, L"Sign in",               CPFG_NONE },
+    { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),                  CPFG_CREDENTIAL_PROVIDER_LOGO },
+    { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik Passwordless"), CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Enter username and OTP"), CPFG_CREDENTIAL_PROVIDER_LABEL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),              GUID_NULL },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"OTP Code"),              GUID_NULL },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),               GUID_NULL },
 };
 
 // Initial field state pairs
