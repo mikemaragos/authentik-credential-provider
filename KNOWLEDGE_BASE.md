@@ -2,205 +2,274 @@
 
 ## Document Purpose
 
-This document captures ALL knowledge, decisions, challenges, solutions, and technical details from the Authentik Windows Credential Provider OTP authentication project.
+This document captures ALL knowledge, decisions, challenges, solutions, and technical details from the Authentik Windows Credential Provider OTP authentication project. Use this as the single source of truth when starting a new project or resuming this one.
 
-**Last Updated:** December 6, 2025  
+**Last Updated:** December 2025  
 **Project Status:** Phase 1 Complete, Phase 2 In Progress  
-**Architecture:** Custom KSP with OTP-based certificate unlock
+**Current Implementation:** Smart Card PKINIT authentication verified working
 
 ---
 
 ## Project Phases
 
-### Phase 1: Infrastructure Validation ✅ COMPLETE
-- TPM Virtual Smart Card working
-- Certificate enrollment to VSC working  
-- PKINIT authentication to AD working
-- Auto UPN mapping (StrongCertificateBindingEnforcement=0)
+### Phase 1: VSC + PKINIT Verification ✅ COMPLETE
+Verified that Virtual Smart Card with PKINIT authentication works in the environment.
 
-### Phase 2: Custom KSP Implementation 🔄 IN PROGRESS
-- Custom Key Storage Provider (AuthentikKSP)
-- OTP validation replaces PIN verification
-- User enters username + OTP only
-- No stored secrets
+### Phase 2: Authentik Integration 🔄 IN PROGRESS  
+Custom Credential Provider that validates OTP with Authentik, issues certificate, and performs PKINIT.
+
+### Phase 3: Production Hardening (Future)
+Security hardening, logging, deployment automation.
 
 ---
 
-## Architecture (Phase 2)
+## Phase 1 Results - Critical Findings
 
-```
-User: [Username] [OTP Code]
-         │
-         ▼
-┌─────────────────────┐
-│ Credential Provider │ → OTP passed as "PIN"
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐      ┌─────────────┐
-│   AuthentikKSP      │─────>│  Authentik  │
-│   (Custom KSP)      │      │  Validate   │
-│                     │<─────│  OTP        │
-│   NCryptSignHash    │      └─────────────┘
-│   intercepts PIN    │
-└──────────┬──────────┘
-           │ If OTP Valid
-           ▼
-┌─────────────────────┐      ┌─────────────┐
-│   Sign PKINIT       │─────>│   Domain    │
-│   Pre-Auth Data     │      │ Controller  │
-└─────────────────────┘      │   TGT ✓     │
-                             └─────────────┘
-```
+### KB5014754 Strong Certificate Mapping (CRITICAL)
 
-### Why OTP = Unlock?
+Microsoft's KB5014754 (May 2022) fundamentally changed certificate-based authentication. As of February 2025, **strong mapping is enforced by default**.
 
-| Old Approach | New Approach |
-|--------------|--------------|
-| Store random PIN in Authentik | No secrets stored |
-| Retrieve PIN after OTP | OTP IS the unlock |
-| Two round trips | Single validation |
-| PIN could leak | OTP is one-time |
+**What This Means:**
+- UPN-only mapping is now considered "weak" and FAILS
+- Certificates must either:
+  1. Contain SID extension (OID `1.3.6.1.4.1.311.25.2`), OR
+  2. Have explicit `altSecurityIdentities` mapping in AD
 
----
+**Why Our Certificates Lack SID Extension:**
+- SID extension is auto-added only when template uses "Build from this Active Directory information"
+- Our template uses "Supply in the request" (required for Authentik/third-party integration)
+- Therefore, explicit mapping is REQUIRED
 
-## Environment Configuration
+**Strong vs Weak Mapping:**
+| Mapping Type | Strength | Our Use |
+|--------------|----------|---------|
+| SID Extension in cert | Strong | Not available (Supply in Request template) |
+| X509:\<SKI\> | Strong | ✅ Using this |
+| X509:\<I\>\<SR\> (Issuer+Serial) | Strong | Alternative option |
+| UPN in SAN | Weak | ❌ No longer works |
+| Subject only | Weak | ❌ No longer works |
 
-### Domain
-| Component | Value |
-|-----------|-------|
-| Domain | test.local |
-| DC | WIN-6DP39D0OLI8 |
-| CA | test-WIN-6DP39D0OLI8-CA |
-| CA Config | `WIN-6DP39D0OLI8\test-WIN-6DP39D0OLI8-CA` |
+### Explicit SKI Mapping Requirement
 
-### Certificate Template: AuthentikSmartcard
-- EKU: Smart Card Logon (1.3.6.1.4.1.311.20.2.2)
-- EKU: Client Authentication (1.3.6.1.5.5.7.3.2)
-- SAN: User Principal Name
-- Key: 2048-bit RSA, AT_KEYEXCHANGE
+Every certificate issued requires AD to be updated with SKI mapping:
 
-### DC Registry
 ```powershell
-# Auto UPN mapping (no manual altSecurityIdentities needed)
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Kdc" `
-    -Name "StrongCertificateBindingEnforcement" -Value 0 -Type DWord
+# Get SKI from certificate
+$cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -eq "CN=username"}
+$ski = $cert.Extensions | Where-Object {$_.Oid.Value -eq "2.5.29.14"}
+$skiHash = $ski.Format(0)  # Returns something like "a1b2c3d4..."
+
+# Set mapping in AD
+Set-ADUser username -Add @{altSecurityIdentities="X509:<SKI>$skiHash"}
+```
+
+### Working Phase 1 Configuration
+
+| Component | Setting | Value |
+|-----------|---------|-------|
+| DC | StrongCertificateBindingEnforcement | 0 |
+| DC | UseSubjectAltName | 1 |
+| DC | altSecurityIdentities | X509:\<SKI\>[hash] per user |
+| Workstation | Smart Card CP Registry | Enabled (GUID below) |
+| VSC | PIN | 12345678 |
+| Cert Template | Name | AuthentikSmartcard |
+| Cert Template | Subject Name | Supply in the request |
+
+**Smart Card Credential Provider GUID:**
+```
+{8FD7E19C-3BF7-489B-A72C-846AB3678C96}
+```
+
+**Enable Smart Card CP:**
+```powershell
+$path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8FD7E19C-3BF7-489B-A72C-846AB3678C96}"
+if (!(Test-Path $path)) { New-Item -Path $path -Force }
+Set-ItemProperty -Path $path -Name "Disabled" -Value 0 -Type DWord
 ```
 
 ---
 
-## Custom KSP Technical Details
+## Phase 2 Architecture
 
-### CNG Interface
+### Design Decision: Option A - Authentik Controls Certificate Issuance
 
-```cpp
-// Key function - validates OTP before signing
-SECURITY_STATUS WINAPI KSPSignHash(
-    NCRYPT_PROV_HANDLE hProvider,
-    NCRYPT_KEY_HANDLE hKey,
-    VOID *pPaddingInfo,
-    PBYTE pbHashValue,
-    DWORD cbHashValue,
-    PBYTE pbSignature,
-    DWORD cbSignature,
-    DWORD *pcbResult,
-    DWORD dwFlags)
-{
-    // Get OTP from key context (was set via NCRYPT_PIN_PROPERTY)
-    std::wstring otp = GetKeyOTP(hKey);
-    std::wstring username = GetKeyUsername(hKey);
-    
-    // Validate with Authentik
-    if (!ValidateOTPWithAuthentik(username, otp))
-    {
-        return NTE_BAD_KEYSET;
-    }
-    
-    // OTP valid - perform signature
-    return ActualSignHash(...);
-}
+**Rationale:** Centralized control over certificate lifecycle, Authentik manages everything.
+
+**Alternative Considered:** Option B - Workstation enrolls directly from AD CS after OTP validation. Simpler for certificates (auto SID), but less control.
+
+### Authentication Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     PHASE 2 AUTHENTICATION FLOW                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. User enters Username + OTP at Windows Login                     │
+│                           │                                          │
+│                           ▼                                          │
+│  2. Credential Provider ──────► Authentik (validate OTP)            │
+│                           │                                          │
+│                           ▼                                          │
+│  3. Authentik ──────► CertIssuer ──────► AD CS (issue certificate)  │
+│                           │                                          │
+│                           ▼                                          │
+│  4. CertIssuer ──────► AD via LDAP (update altSecurityIdentities)   │
+│                           │                                          │
+│                           ▼                                          │
+│  5. Certificate returned to Credential Provider                      │
+│                           │                                          │
+│                           ▼                                          │
+│  6. Credential Provider ──────► Import certificate to VSC           │
+│                           │                                          │
+│                           ▼                                          │
+│  7. Build KERB_CERTIFICATE_LOGON ──────► LSA ──────► PKINIT         │
+│                           │                                          │
+│                           ▼                                          │
+│  8. KDC validates certificate ──────► TGT issued ──────► SUCCESS    │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### KSP Registration
+### CertIssuer Requirements
 
-```registry
-[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Cryptography\Providers\Authentik Key Storage Provider]
-"Image Path"="C:\\Windows\\System32\\AuthentikKSP.dll"
-"Type"=dword:00000001
-```
+After issuing each certificate, CertIssuer MUST:
+
+1. **Extract SKI** from issued certificate:
+   ```python
+   from cryptography import x509
+   from cryptography.x509.oid import ExtensionOID
+   
+   cert = x509.load_pem_x509_certificate(cert_pem)
+   ski_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_KEY_IDENTIFIER)
+   ski_hex = ski_ext.value.digest.hex()
+   ```
+
+2. **Update AD via LDAP**:
+   ```python
+   import ldap3
+   
+   conn = ldap3.Connection(server, user=admin_dn, password=admin_pw)
+   conn.modify(user_dn, {
+       'altSecurityIdentities': [(ldap3.MODIFY_REPLACE, [f'X509:<SKI>{ski_hex}'])]
+   })
+   ```
+
+### Certificate Requirements
+
+| Attribute | Requirement |
+|-----------|-------------|
+| EKU | Smart Card Logon (1.3.6.1.4.1.311.20.2.2) |
+| SAN | UPN: user@domain.local |
+| Key Usage | Digital Signature |
+| KeySpec | AT_KEYEXCHANGE (1) |
+| Subject | CN=username |
+
+### Credential Provider Changes
+
+The credential provider must be modified to:
+
+1. **Remove password field** - OTP only
+2. **Call Authentik API** with username + OTP
+3. **Receive certificate** from Authentik/CertIssuer
+4. **Import to VSC** using CertEnroll or minidriver APIs
+5. **Build KERB_CERTIFICATE_LOGON** structure (not KERB_INTERACTIVE_LOGON)
+6. **Set CSP info** pointing to VSC
 
 ### KERB_CERTIFICATE_LOGON Structure
 
 ```cpp
 typedef struct _KERB_CERTIFICATE_LOGON {
-    KERB_LOGON_SUBMIT_TYPE MessageType;  // KerbCertificateLogon = 13
+    KERB_LOGON_SUBMIT_TYPE MessageType;  // KerbCertificateLogon = 11
     UNICODE_STRING DomainName;
     UNICODE_STRING UserName;
-    UNICODE_STRING Pin;                   // ← OTP goes here!
+    UNICODE_STRING Pin;
     ULONG Flags;
     ULONG CspDataLength;
-    PUCHAR CspData;                       // KERB_SMARTCARD_CSP_INFO
-} KERB_CERTIFICATE_LOGON;
-```
+    PUCHAR CspData;  // KERB_SMARTCARD_CSP_INFO
+} KERB_CERTIFICATE_LOGON, *PKERB_CERTIFICATE_LOGON;
 
-### KERB_SMARTCARD_CSP_INFO Structure
-
-```cpp
 typedef struct _KERB_SMARTCARD_CSP_INFO {
     DWORD dwCspInfoLen;
-    DWORD MessageType;       // 1
+    DWORD MessageType;        // Must be 1
+    union {
+        PVOID ContextInformation;
+        ULONG64 SpaceHolderForWow64;
+    };
     DWORD flags;
-    DWORD KeySpec;           // AT_KEYEXCHANGE = 1
+    DWORD KeySpec;            // AT_KEYEXCHANGE = 1
     ULONG nCardNameOffset;
     ULONG nReaderNameOffset;
     ULONG nContainerNameOffset;
-    ULONG nCSPNameOffset;    // "Authentik Key Storage Provider"
-    TCHAR bBuffer[];
+    ULONG nCSPNameOffset;
+    TCHAR bBuffer[];          // Variable length buffer with names
 } KERB_SMARTCARD_CSP_INFO;
 ```
 
 ---
 
-## API Integration
+## Environment Details
 
-### CertIssuer API
-- **URL:** certissuer.test.local:8443
-- **Token:** dkWSmvx1aE6EiPGU9GJ2nNAMN5YczqeC
-- **Purpose:** Certificate enrollment
+### Network
+| Host | IP | Role |
+|------|----|----- |
+| authentik.test.local | 192.168.1.114 | Identity Provider |
+| WIN-6DP39D0OLI8.test.local | 192.168.1.101 | Domain Controller |
 
-### Authentik API
-- **URL:** authentik.test.local:443
-- **Flow:** windows-otp-auth
-- **Purpose:** OTP validation
+### Domain
+- NetBIOS: TEST
+- FQDN: test.local
+- Test User: shop (UPN: shop@test.local)
+
+### Services
+- Authentik: HTTPS on 443
+- CertIssuer: HTTPS on 8443
 
 ---
 
-## File Structure (Target)
+## Common Issues & Solutions
 
-```
-authentik-credential-provider/
-├── CredentialProvider/
-│   ├── AuthentikCredential.cpp/.h
-│   ├── AuthentikCredentialProvider.cpp/.h
-│   ├── CertificateLogonPacking.cpp/.h
-│   ├── FieldDescriptors.h
-│   └── Dll.cpp
-│
-├── AuthentikKSP/
-│   ├── AuthentikKSP.cpp
-│   ├── KSPProvider.cpp/.h
-│   ├── KSPKey.cpp/.h
-│   ├── OTPValidator.cpp/.h
-│   └── AuthentikKSP.def
-│
-├── Shared/
-│   ├── AuthentikAPI.cpp/.h
-│   └── Logger.h
-│
-└── Docs/
-    ├── KNOWLEDGE_BASE.md
-    └── Phase2-Architecture-OTP-Unlock.md
-```
+### Phase 1 Issues
+
+**Issue: Smart card tile doesn't appear at login**
+- Solution: Enable Smart Card CP via registry (see GUID above)
+- Reboot required
+
+**Issue: PKINIT fails with "cannot find certificate"**
+- Solution: Verify altSecurityIdentities contains correct X509:\<SKI\> mapping
+- Check: `Get-ADUser username -Properties altSecurityIdentities`
+
+**Issue: Certificate chain validation fails**
+- Solution: Ensure CA cert is in NTAuth store and propagated via GPO
+- Run: `certutil -viewstore -enterprise NTAuth`
+
+**Issue: Event 39 on DC (no strong mapping)**
+- Solution: This is expected without SID extension - use explicit SKI mapping
+
+### Build Issues
+
+**Issue: LNK2019 unresolved external symbol**
+- Solution: Add to linker: `Secur32.lib;Advapi32.lib;Shlwapi.lib;Winhttp.lib`
+
+**Issue: Credential provider doesn't appear**
+- Solution: Reboot after regsvr32, check registry, verify x64 build
+
+---
+
+## Security Considerations
+
+### Current (Development)
+- ⚠️ SSL certificate validation disabled
+- ⚠️ StrongCertificateBindingEnforcement = 0
+- ⚠️ Hardcoded test values
+
+### Production Requirements
+- [ ] Enable SSL certificate validation
+- [ ] Set StrongCertificateBindingEnforcement = 1 (after Sept 2025, no choice)
+- [ ] Implement certificate pinning
+- [ ] Use DPAPI for storing sensitive configuration
+- [ ] Code sign the DLL
+- [ ] Enable Windows Event Log integration
+- [ ] Implement certificate revocation checking
 
 ---
 
@@ -208,73 +277,63 @@ authentik-credential-provider/
 
 ### Workstation
 ```powershell
-# View certificates on smart card/VSC
+# List certificates
+Get-ChildItem Cert:\CurrentUser\My | Format-Table Subject, Thumbprint, NotAfter
+
+# Check certificate details
+$cert = Get-ChildItem Cert:\CurrentUser\My | Where {$_.Subject -eq "CN=shop"}
+$cert | Format-List *
+
+# Check for SID extension (will be empty for our certs)
+$cert.Extensions | Where {$_.Oid.Value -eq "1.3.6.1.4.1.311.25.2"}
+
+# Check SKI
+$cert.Extensions | Where {$_.Oid.Value -eq "2.5.29.14"} | % {$_.Format(0)}
+
+# VSC status
 certutil -scinfo
 
-# View user certificates
-certutil -user -store My
-
-# Check TPM
-Get-Tpm
+# Test smart card logon
+runas /smartcard /user:shop@test.local cmd.exe
 ```
 
 ### Domain Controller
 ```powershell
-# Verify KDC certificate
-certutil -dcinfo verify
+# Check user's certificate mapping
+Get-ADUser shop -Properties altSecurityIdentities, userPrincipalName | 
+    Select Name, userPrincipalName, altSecurityIdentities
 
-# Check NTAuth store
+# Check KDC registry
+Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Kdc" | 
+    Select StrongCertificateBindingEnforcement, UseSubjectAltName
+
+# PKINIT events
+Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4768} -MaxEvents 10
+
+# NTAuth store
 certutil -viewstore -enterprise NTAuth
-
-# View auth events
-Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4768,4771} -MaxEvents 10
 ```
 
 ---
 
-## Common Issues
+## Resources
 
-### KDC_ERR_CLIENT_NOT_TRUSTED (0x42)
-- **Cause:** Certificate mapping issue
-- **Fix:** Enable auto UPN mapping or add altSecurityIdentities
-
-### NTE_BAD_KEYSET
-- **Cause:** VSC corrupted or OTP invalid (in our KSP)
-- **Fix:** Recreate VSC or check OTP
-
-### Template Not Visible
-- **Cause:** Wrong CA config or firewall
-- **Fix:** Use `SERVER\CA-Name` format, check RPC ports
+- [KB5014754 - Certificate Strong Mapping](https://support.microsoft.com/en-us/topic/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers-ad2c23b0-15d8-4340-a468-4d4f3b188f16)
+- [Microsoft Credential Provider Documentation](https://docs.microsoft.com/en-us/windows/win32/secauthn/credential-providers-in-windows)
+- [Smart Card Certificate Requirements](https://learn.microsoft.com/en-us/windows/security/identity-protection/smart-cards/smart-card-certificate-requirements-and-enumeration)
+- [Authentik Documentation](https://goauthentik.io/docs/)
+- [altSecurityIdentities Mapping](https://blogs.msdn.microsoft.com/spatdsg/2010/06/18/howto-map-a-user-to-a-certificate-via-all-the-methods-available-in-the-altsecurityidentities-attribute/)
 
 ---
 
-## Security Notes
+## Version History
 
-### Production Checklist
-- [ ] Re-evaluate StrongCertificateBindingEnforcement
-- [ ] Enable HTTPS certificate validation
-- [ ] Implement certificate pinning
-- [ ] Add rate limiting for OTP validation
-- [ ] Enable audit logging
-- [ ] Code sign all DLLs
-
-### OTP Security
-- One-time use (TOTP/HOTP)
-- 30-60 second validity
-- Server-side validation only
-- Never stored locally
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | Nov 2025 | Initial release - OTP with password |
+| 2.0 | Dec 2025 | Phase 1 complete - VSC+PKINIT verified |
+| 2.1 | Dec 2025 | Phase 2 architecture defined |
 
 ---
 
-## Next Steps
-
-1. **Implement AuthentikKSP** - CNG key storage provider
-2. **OTP interception** - Capture PIN, validate with Authentik
-3. **Update Credential Provider** - Remove password, add OTP field
-4. **Certificate enrollment** - Auto-enroll via CertIssuer
-5. **End-to-end testing** - Full login flow
-
----
-
-**Version:** 3.0  
-**Last Updated:** December 6, 2025
+**This knowledge base ensures no knowledge is lost when resuming or restarting this project.**
