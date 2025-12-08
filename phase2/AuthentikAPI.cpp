@@ -6,11 +6,13 @@
 #include "AuthentikAPI.h"
 #include "Logger.h"
 #include <wincrypt.h>
+#include <objbase.h>
 #include <sstream>
 #include <algorithm>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "ole32.lib")
 
 // Constructor
 AuthentikAPI::AuthentikAPI() :
