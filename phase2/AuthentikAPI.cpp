@@ -1,12 +1,12 @@
 // AuthentikAPI.cpp
-// HTTP client for Authentik API communication - Phase 2 (Passwordless with Certificate)
+// HTTP client for Authentik and CertIssuer API communication
+// Phase 2: Passwordless certificate-based authentication
+// Updated December 8, 2025
 
 #include "AuthentikAPI.h"
 #include "Logger.h"
-#include <winhttp.h>
-#include <wincrypt.h>
 #include <sstream>
-#include <vector>
+#include <algorithm>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
@@ -17,11 +17,11 @@ AuthentikAPI::AuthentikAPI() :
     _authentikPort(443),
     _flowSlug(L"windows-otp-auth"),
     _useHttps(true),
-    _certIssuerServer(L"authentik.test.local"),
+    _certIssuerServer(L"192.168.1.101"),
     _certIssuerPort(8443),
     _certIssuerApiToken(L"")
 {
-    LOG("AuthentikAPI::Constructor (Phase 2)");
+    LOG("AuthentikAPI::Constructor");
     _LoadConfiguration();
 }
 
@@ -29,128 +29,6 @@ AuthentikAPI::AuthentikAPI() :
 AuthentikAPI::~AuthentikAPI()
 {
     LOG("AuthentikAPI::Destructor");
-    // Clear sensitive data
-    SecureZeroMemory(&_certIssuerApiToken[0], _certIssuerApiToken.length() * sizeof(wchar_t));
-}
-
-// Validate OTP with Authentik
-AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const std::wstring& otp)
-{
-    LOG("ValidateOTP: user=%S", username.c_str());
-
-    AuthentikResponse response;
-    response.success = false;
-
-    // Build request URL for Authentik flow executor
-    std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
-
-    // Step 1: Send username to identify user
-    std::wstring payload = L"{\"uid_field\":\"" + username + L"\"}";
-    std::wstring responseBody;
-    
-    HRESULT hr = _MakeHttpRequest(_authentikServer, _authentikPort, L"POST", url, payload, responseBody);
-    if (FAILED(hr))
-    {
-        LOG("Failed to initiate auth: 0x%08x", hr);
-        response.message = L"Failed to connect to authentication server";
-        return response;
-    }
-
-    // Check if we got OTP challenge
-    if (responseBody.find(L"ak-stage-authenticator-validate") == std::wstring::npos &&
-        responseBody.find(L"otp") == std::wstring::npos)
-    {
-        LOG("Unexpected response - no OTP challenge");
-        response.message = L"Authentication flow error";
-        return response;
-    }
-
-    // Step 2: Send OTP code
-    payload = L"{\"code\":\"" + otp + L"\"}";
-    hr = _MakeHttpRequest(_authentikServer, _authentikPort, L"POST", url, payload, responseBody);
-    
-    if (FAILED(hr))
-    {
-        LOG("Failed to validate OTP: 0x%08x", hr);
-        response.message = L"Failed to validate OTP";
-        return response;
-    }
-
-    // Parse response
-    response = _ParseOTPResponse(responseBody);
-    LOG("ValidateOTP result: success=%d", response.success);
-
-    return response;
-}
-
-// Request certificate from CertIssuer
-CertificateResponse AuthentikAPI::RequestCertificate(const std::wstring& username, const std::wstring& domain)
-{
-    LOG("RequestCertificate: user=%S, domain=%S", username.c_str(), domain.c_str());
-
-    CertificateResponse response;
-    response.success = false;
-
-    // Build request to CertIssuer API
-    std::wstring url = L"/api/v1/certificate/issue";
-
-    // Build JSON payload
-    std::wstring payload = L"{";
-    payload += L"\"username\":\"" + username + L"\",";
-    payload += L"\"domain\":\"" + domain + L"\",";
-    payload += L"\"template\":\"AuthentikSmartcard\"";
-    payload += L"}";
-
-    std::wstring responseBody;
-    std::vector<BYTE> binaryResponse;
-
-    HRESULT hr = _MakeHttpRequest(
-        _certIssuerServer, 
-        _certIssuerPort, 
-        L"POST", 
-        url, 
-        payload, 
-        responseBody,
-        &binaryResponse);
-
-    if (FAILED(hr))
-    {
-        LOG("Failed to request certificate: 0x%08x", hr);
-        response.message = L"Failed to connect to certificate issuer";
-        return response;
-    }
-
-    // Parse response
-    response = _ParseCertificateResponse(responseBody, binaryResponse);
-    LOG("RequestCertificate result: success=%d, certSize=%d", 
-        response.success, response.certificateDer.size());
-
-    return response;
-}
-
-// Combined: Validate OTP and get certificate
-CertificateResponse AuthentikAPI::AuthenticateAndGetCertificate(
-    const std::wstring& username, 
-    const std::wstring& otp,
-    const std::wstring& domain)
-{
-    LOG("AuthenticateAndGetCertificate: user=%S", username.c_str());
-
-    CertificateResponse certResponse;
-    certResponse.success = false;
-
-    // Step 1: Validate OTP
-    AuthentikResponse otpResponse = ValidateOTP(username, otp);
-    if (!otpResponse.success)
-    {
-        certResponse.message = otpResponse.message;
-        return certResponse;
-    }
-
-    // Step 2: Request certificate (CertIssuer will also update AD mapping)
-    certResponse = RequestCertificate(username, domain);
-
-    return certResponse;
 }
 
 // Load configuration from registry
@@ -168,73 +46,61 @@ void AuthentikAPI::_LoadConfiguration()
 
     if (result == ERROR_SUCCESS)
     {
-        WCHAR buffer[256];
+        WCHAR buffer[512];
         DWORD bufferSize;
 
-        // Authentik server
+        // Authentik server settings
         bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"AuthentikServer", nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
+        if (RegQueryValueExW(hKey, L"AuthentikServer", nullptr, nullptr, (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS)
         {
             _authentikServer = buffer;
             LOG("AuthentikServer: %S", _authentikServer.c_str());
         }
 
-        // Authentik port
         DWORD port = 443;
         bufferSize = sizeof(DWORD);
-        result = RegQueryValueExW(hKey, L"AuthentikPort", nullptr, nullptr, (LPBYTE)&port, &bufferSize);
-        if (result == ERROR_SUCCESS)
+        if (RegQueryValueExW(hKey, L"AuthentikPort", nullptr, nullptr, (LPBYTE)&port, &bufferSize) == ERROR_SUCCESS)
         {
             _authentikPort = (INTERNET_PORT)port;
             LOG("AuthentikPort: %d", _authentikPort);
         }
 
-        // Flow slug
         bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"FlowSlug", nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
+        if (RegQueryValueExW(hKey, L"FlowSlug", nullptr, nullptr, (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS)
         {
             _flowSlug = buffer;
             LOG("FlowSlug: %S", _flowSlug.c_str());
         }
 
-        // HTTPS flag
         DWORD useHttps = 1;
         bufferSize = sizeof(DWORD);
-        result = RegQueryValueExW(hKey, L"UseHttps", nullptr, nullptr, (LPBYTE)&useHttps, &bufferSize);
-        if (result == ERROR_SUCCESS)
+        if (RegQueryValueExW(hKey, L"UseHttps", nullptr, nullptr, (LPBYTE)&useHttps, &bufferSize) == ERROR_SUCCESS)
         {
             _useHttps = (useHttps != 0);
             LOG("UseHttps: %d", _useHttps);
         }
 
-        // CertIssuer server
+        // CertIssuer server settings
         bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"CertIssuerServer", nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
+        if (RegQueryValueExW(hKey, L"CertIssuerServer", nullptr, nullptr, (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS)
         {
             _certIssuerServer = buffer;
             LOG("CertIssuerServer: %S", _certIssuerServer.c_str());
         }
 
-        // CertIssuer port
         port = 8443;
         bufferSize = sizeof(DWORD);
-        result = RegQueryValueExW(hKey, L"CertIssuerPort", nullptr, nullptr, (LPBYTE)&port, &bufferSize);
-        if (result == ERROR_SUCCESS)
+        if (RegQueryValueExW(hKey, L"CertIssuerPort", nullptr, nullptr, (LPBYTE)&port, &bufferSize) == ERROR_SUCCESS)
         {
             _certIssuerPort = (INTERNET_PORT)port;
             LOG("CertIssuerPort: %d", _certIssuerPort);
         }
 
-        // CertIssuer API token
         bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"CertIssuerApiToken", nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
+        if (RegQueryValueExW(hKey, L"CertIssuerApiToken", nullptr, nullptr, (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS)
         {
             _certIssuerApiToken = buffer;
-            LOG("CertIssuerApiToken: (loaded)");
+            LOG("CertIssuerApiToken: (loaded, %d chars)", _certIssuerApiToken.length());
         }
 
         RegCloseKey(hKey);
@@ -245,17 +111,153 @@ void AuthentikAPI::_LoadConfiguration()
     }
 }
 
+// Validate OTP with Authentik
+AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const std::wstring& otp)
+{
+    LOG("ValidateOTP: user=%S", username.c_str());
+
+    AuthentikResponse response;
+    response.success = false;
+
+    // Build request URL for Authentik flow
+    std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
+
+    // Build JSON payload - first submit username
+    std::wstring payload = L"{\"uid_field\":\"" + username + L"\"}";
+
+    std::wstring responseBody;
+    HRESULT hr = _MakeHttpRequest(
+        _authentikServer,
+        _authentikPort,
+        _useHttps,
+        L"POST",
+        url,
+        payload,
+        L"",
+        responseBody);
+
+    if (FAILED(hr))
+    {
+        LOG("ValidateOTP: username submission failed: 0x%08x", hr);
+        response.message = L"Failed to connect to authentication server";
+        return response;
+    }
+
+    // Check if OTP challenge is presented
+    if (responseBody.find(L"ak-stage-authenticator-validate") != std::wstring::npos)
+    {
+        LOG("ValidateOTP: OTP challenge received, submitting OTP");
+        
+        // Submit OTP
+        payload = L"{\"code\":\"" + otp + L"\"}";
+        hr = _MakeHttpRequest(
+            _authentikServer,
+            _authentikPort,
+            _useHttps,
+            L"POST",
+            url,
+            payload,
+            L"",
+            responseBody);
+
+        if (FAILED(hr))
+        {
+            LOG("ValidateOTP: OTP submission failed: 0x%08x", hr);
+            response.message = L"Failed to validate OTP";
+            return response;
+        }
+    }
+
+    // Parse response
+    response = _ParseOTPResponse(responseBody);
+    LOG("ValidateOTP response: success=%d", response.success);
+
+    return response;
+}
+
+// Request certificate from CertIssuer
+CertificateResponse AuthentikAPI::RequestCertificate(const std::wstring& username, const std::wstring& domain)
+{
+    LOG("RequestCertificate: user=%S, domain=%S", username.c_str(), domain.c_str());
+
+    CertificateResponse response;
+    response.success = false;
+    response.adMappingUpdated = false;
+
+    // Build request URL
+    std::wstring url = L"/api/v1/certificate/issue";
+
+    // Build JSON payload
+    std::wstring payload = L"{\"username\":\"" + username + L"\",\"domain\":\"" + domain + L"\"}";
+
+    // Build auth header
+    std::wstring authHeader = L"Bearer " + _certIssuerApiToken;
+
+    std::wstring responseBody;
+    HRESULT hr = _MakeHttpRequest(
+        _certIssuerServer,
+        _certIssuerPort,
+        false,  // CertIssuer uses HTTP
+        L"POST",
+        url,
+        payload,
+        authHeader,
+        responseBody);
+
+    if (FAILED(hr))
+    {
+        LOG("RequestCertificate: HTTP request failed: 0x%08x", hr);
+        response.message = L"Failed to connect to certificate issuer";
+        return response;
+    }
+
+    // Parse response
+    response = _ParseCertificateResponse(responseBody);
+    LOG("RequestCertificate: success=%d, ski=%S", response.success, response.subjectKeyIdentifier.c_str());
+
+    return response;
+}
+
+// Combined: Validate OTP and get certificate
+CertificateResponse AuthentikAPI::AuthenticateAndGetCertificate(
+    const std::wstring& username,
+    const std::wstring& otp,
+    const std::wstring& domain)
+{
+    LOG("AuthenticateAndGetCertificate: user=%S", username.c_str());
+
+    CertificateResponse certResponse;
+    certResponse.success = false;
+
+    // Step 1: Validate OTP with Authentik
+    AuthentikResponse otpResponse = ValidateOTP(username, otp);
+    if (!otpResponse.success)
+    {
+        LOG("AuthenticateAndGetCertificate: OTP validation failed");
+        certResponse.message = otpResponse.message;
+        return certResponse;
+    }
+
+    LOG("AuthenticateAndGetCertificate: OTP validated, requesting certificate");
+
+    // Step 2: Request certificate from CertIssuer
+    certResponse = RequestCertificate(username, domain);
+
+    return certResponse;
+}
+
 // Make HTTP request
 HRESULT AuthentikAPI::_MakeHttpRequest(
     const std::wstring& server,
     INTERNET_PORT port,
+    bool useHttps,
     const std::wstring& method,
-    const std::wstring& url,
+    const std::wstring& path,
     const std::wstring& payload,
-    std::wstring& responseBody,
-    std::vector<BYTE>* binaryResponse)
+    const std::wstring& authHeader,
+    std::wstring& responseBody)
 {
-    LOG("HTTP %S %S:%d%S", method.c_str(), server.c_str(), port, url.c_str());
+    LOG("HTTP %S %S:%d%S", method.c_str(), server.c_str(), port, path.c_str());
 
     HRESULT hr = E_FAIL;
     HINTERNET hSession = nullptr;
@@ -286,12 +288,11 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     }
 
     // Create request
-    DWORD dwFlags = _useHttps ? WINHTTP_FLAG_SECURE : 0;
-    
+    DWORD dwFlags = useHttps ? WINHTTP_FLAG_SECURE : 0;
     hRequest = WinHttpOpenRequest(
         hConnect,
         method.c_str(),
-        url.c_str(),
+        path.c_str(),
         nullptr,
         WINHTTP_NO_REFERER,
         WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -306,31 +307,26 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     }
 
     // Disable SSL certificate validation for testing (REMOVE IN PRODUCTION)
-    if (_useHttps)
+    if (useHttps)
     {
         DWORD dwSecFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
                           SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
                           SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
-        
         WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwSecFlags, sizeof(dwSecFlags));
         LOG("WARNING: SSL certificate validation disabled");
     }
 
-    // Set headers
+    // Build headers
     std::wstring headers = L"Content-Type: application/json\r\n";
-    
-    // Add session cookies if we have them
+    if (!authHeader.empty())
+    {
+        headers += L"Authorization: " + authHeader + L"\r\n";
+    }
     if (!_sessionCookies.empty())
     {
         headers += L"Cookie: " + _sessionCookies + L"\r\n";
     }
-
-    // Add API token for CertIssuer
-    if (!_certIssuerApiToken.empty() && server == _certIssuerServer)
-    {
-        headers += L"Authorization: Bearer " + _certIssuerApiToken + L"\r\n";
-    }
-
+    
     WinHttpAddRequestHeaders(hRequest, headers.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
 
     // Convert payload to UTF-8
@@ -370,20 +366,15 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         goto cleanup;
     }
 
-    // Extract cookies from response headers
+    // Store cookies from response
     {
-        DWORD dwSize = 0;
-        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_SET_COOKIE, WINHTTP_HEADER_NAME_BY_INDEX, 
-                           nullptr, &dwSize, WINHTTP_NO_HEADER_INDEX);
-        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && dwSize > 0)
+        WCHAR cookieBuffer[4096];
+        DWORD cookieSize = sizeof(cookieBuffer);
+        if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_SET_COOKIE, WINHTTP_HEADER_NAME_BY_INDEX,
+                               cookieBuffer, &cookieSize, WINHTTP_NO_HEADER_INDEX))
         {
-            std::vector<wchar_t> cookieBuffer(dwSize / sizeof(wchar_t) + 1);
-            if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_SET_COOKIE, WINHTTP_HEADER_NAME_BY_INDEX,
-                                   &cookieBuffer[0], &dwSize, WINHTTP_NO_HEADER_INDEX))
-            {
-                _sessionCookies = &cookieBuffer[0];
-                LOG("Cookies saved");
-            }
+            _sessionCookies = cookieBuffer;
+            LOG("Session cookies updated");
         }
     }
 
@@ -397,32 +388,16 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         {
             dwSize = 0;
             if (!WinHttpQueryDataAvailable(hRequest, &dwSize))
-            {
-                LOG("WinHttpQueryDataAvailable failed: %d", GetLastError());
                 break;
-            }
-
             if (dwSize == 0)
                 break;
 
-            std::vector<char> tempBuffer(dwSize + 1);
-            ZeroMemory(&tempBuffer[0], dwSize + 1);
-
+            std::vector<char> tempBuffer(dwSize + 1, 0);
             if (!WinHttpReadData(hRequest, &tempBuffer[0], dwSize, &dwDownloaded))
-            {
-                LOG("WinHttpReadData failed: %d", GetLastError());
                 break;
-            }
 
             responseBuffer.insert(responseBuffer.end(), tempBuffer.begin(), tempBuffer.begin() + dwDownloaded);
-
         } while (dwSize > 0);
-
-        // Store binary response if requested
-        if (binaryResponse && !responseBuffer.empty())
-        {
-            binaryResponse->assign(responseBuffer.begin(), responseBuffer.end());
-        }
 
         // Convert response to wide string
         if (!responseBuffer.empty())
@@ -434,7 +409,6 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
                 std::vector<wchar_t> wideBuffer(wideSize);
                 MultiByteToWideChar(CP_UTF8, 0, &responseBuffer[0], -1, &wideBuffer[0], wideSize);
                 responseBody = &wideBuffer[0];
-                
                 LOG("Response received: %d bytes", responseBuffer.size());
                 hr = S_OK;
             }
@@ -457,7 +431,7 @@ AuthentikResponse AuthentikAPI::_ParseOTPResponse(const std::wstring& json)
     AuthentikResponse response;
     response.success = false;
 
-    // Check for success (redirect type indicates successful auth)
+    // Check for success (redirect type indicates success)
     if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos)
     {
         response.success = true;
@@ -466,80 +440,81 @@ AuthentikResponse AuthentikAPI::_ParseOTPResponse(const std::wstring& json)
     }
     else if (json.find(L"\"error\"") != std::wstring::npos)
     {
-        response.success = false;
-        response.message = L"Invalid OTP code";
+        response.message = L"OTP validation failed";
         LOG("OTP validation failed");
     }
     else
     {
-        response.success = false;
-        response.message = L"Unknown response";
-        LOG("Unknown OTP response format");
+        response.message = L"Unknown response from authentication server";
+        LOG("Unknown response format");
     }
 
     return response;
 }
 
-// Parse certificate response
-CertificateResponse AuthentikAPI::_ParseCertificateResponse(const std::wstring& json, const std::vector<BYTE>& binaryData)
+// Parse certificate response from CertIssuer
+CertificateResponse AuthentikAPI::_ParseCertificateResponse(const std::wstring& json)
 {
     LOG("Parsing certificate response");
 
     CertificateResponse response;
     response.success = false;
+    response.adMappingUpdated = false;
 
     // Check for success
-    if (json.find(L"\"success\":true") != std::wstring::npos ||
-        json.find(L"\"success\": true") != std::wstring::npos)
-    {
-        response.success = true;
-
-        // Extract certificate (base64 encoded)
-        std::wstring certB64 = _ExtractJsonValue(json, L"certificate");
-        if (!certB64.empty())
-        {
-            response.certificateDer = _Base64Decode(certB64);
-            LOG("Certificate extracted: %d bytes", response.certificateDer.size());
-        }
-
-        // Extract private key (base64 encoded PKCS#8 or blob)
-        std::wstring keyB64 = _ExtractJsonValue(json, L"private_key");
-        if (!keyB64.empty())
-        {
-            response.privateKeyBlob = _Base64Decode(keyB64);
-            LOG("Private key extracted: %d bytes", response.privateKeyBlob.size());
-        }
-
-        // Extract SKI
-        response.subjectKeyIdentifier = _ExtractJsonValue(json, L"ski");
-        LOG("SKI: %S", response.subjectKeyIdentifier.c_str());
-
-        response.message = L"Certificate issued successfully";
-    }
-    else
+    response.success = _ExtractJsonBool(json, L"success");
+    
+    if (!response.success)
     {
         response.message = _ExtractJsonValue(json, L"error");
         if (response.message.empty())
         {
-            response.message = L"Failed to issue certificate";
+            response.message = L"Certificate issuance failed";
         }
         LOG("Certificate issuance failed: %S", response.message.c_str());
+        return response;
     }
 
+    // Extract PFX (base64 encoded)
+    std::wstring pfxBase64 = _ExtractJsonValue(json, L"pfx");
+    if (!pfxBase64.empty())
+    {
+        response.pfxData = _Base64Decode(pfxBase64);
+        LOG("PFX decoded: %d bytes", response.pfxData.size());
+    }
+
+    // Extract PFX password
+    response.pfxPassword = _ExtractJsonValue(json, L"pfx_password");
+    LOG("PFX password: %d chars", response.pfxPassword.length());
+
+    // Extract certificate DER (base64 encoded)
+    std::wstring certBase64 = _ExtractJsonValue(json, L"certificate");
+    if (!certBase64.empty())
+    {
+        response.certificateDer = _Base64Decode(certBase64);
+        LOG("Certificate DER decoded: %d bytes", response.certificateDer.size());
+    }
+
+    // Extract metadata
+    response.subjectKeyIdentifier = _ExtractJsonValue(json, L"ski");
+    response.thumbprint = _ExtractJsonValue(json, L"thumbprint");
+    response.upn = _ExtractJsonValue(json, L"upn");
+    response.adMappingUpdated = _ExtractJsonBool(json, L"ad_mapping_updated");
+
+    LOG("Certificate parsed: SKI=%S, thumbprint=%S, AD updated=%d",
+        response.subjectKeyIdentifier.c_str(),
+        response.thumbprint.c_str(),
+        response.adMappingUpdated);
+
+    response.message = L"Certificate issued successfully";
     return response;
 }
 
-// Extract value from simple JSON
+// Extract string value from JSON
 std::wstring AuthentikAPI::_ExtractJsonValue(const std::wstring& json, const std::wstring& key)
 {
     std::wstring searchKey = L"\"" + key + L"\":";
     size_t pos = json.find(searchKey);
-    if (pos == std::wstring::npos)
-    {
-        searchKey = L"\"" + key + L"\": ";
-        pos = json.find(searchKey);
-    }
-    
     if (pos == std::wstring::npos)
         return L"";
 
@@ -556,37 +531,41 @@ std::wstring AuthentikAPI::_ExtractJsonValue(const std::wstring& json, const std
     if (json[pos] == L'"')
     {
         pos++; // Skip opening quote
-        size_t endPos = json.find(L'"', pos);
-        if (endPos != std::wstring::npos)
+        size_t endPos = pos;
+        while (endPos < json.length() && json[endPos] != L'"')
         {
-            return json.substr(pos, endPos - pos);
+            if (json[endPos] == L'\\' && endPos + 1 < json.length())
+                endPos++; // Skip escaped character
+            endPos++;
         }
-    }
-    else
-    {
-        // Non-string value (number, boolean, etc.)
-        size_t endPos = json.find_first_of(L",}", pos);
-        if (endPos != std::wstring::npos)
-        {
-            return json.substr(pos, endPos - pos);
-        }
+        return json.substr(pos, endPos - pos);
     }
 
-    return L"";
+    // Value is not a string, read until delimiter
+    size_t endPos = pos;
+    while (endPos < json.length() && json[endPos] != L',' && json[endPos] != L'}' && json[endPos] != L'\n')
+        endPos++;
+
+    return json.substr(pos, endPos - pos);
+}
+
+// Extract boolean value from JSON
+bool AuthentikAPI::_ExtractJsonBool(const std::wstring& json, const std::wstring& key)
+{
+    std::wstring value = _ExtractJsonValue(json, key);
+    return (value == L"true" || value == L"True" || value == L"1");
 }
 
 // Base64 decode
 std::vector<BYTE> AuthentikAPI::_Base64Decode(const std::wstring& base64)
 {
     std::vector<BYTE> result;
-
+    
     if (base64.empty())
         return result;
 
-    // Convert to narrow string for CryptStringToBinaryW
+    // Convert wide string to narrow for CryptStringToBinaryW
     DWORD cbBinary = 0;
-    
-    // Get required size
     if (!CryptStringToBinaryW(
         base64.c_str(),
         (DWORD)base64.length(),
@@ -596,13 +575,11 @@ std::vector<BYTE> AuthentikAPI::_Base64Decode(const std::wstring& base64)
         nullptr,
         nullptr))
     {
-        LOG("CryptStringToBinaryW size query failed: %d", GetLastError());
+        LOG("Base64 decode size query failed: %d", GetLastError());
         return result;
     }
 
     result.resize(cbBinary);
-
-    // Decode
     if (!CryptStringToBinaryW(
         base64.c_str(),
         (DWORD)base64.length(),
@@ -612,9 +589,11 @@ std::vector<BYTE> AuthentikAPI::_Base64Decode(const std::wstring& base64)
         nullptr,
         nullptr))
     {
-        LOG("CryptStringToBinaryW decode failed: %d", GetLastError());
+        LOG("Base64 decode failed: %d", GetLastError());
         result.clear();
+        return result;
     }
 
+    result.resize(cbBinary);
     return result;
 }
