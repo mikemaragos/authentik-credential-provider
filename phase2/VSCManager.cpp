@@ -128,13 +128,15 @@ HRESULT VSCManager::ImportPFX(
             return hr;
     }
 
-    // Try API-based import first
-    HRESULT hr = _ImportPFXToVSC(pfxData, pfxPassword, pin);
+    // Use certutil method first - it's more reliable for VSC targeting
+    // The NCrypt API method has issues targeting the VSC correctly
+    LOG("ImportPFX: Using certutil for VSC import");
+    HRESULT hr = _ImportPFXSimple(pfxData, pfxPassword);
     
     if (FAILED(hr))
     {
-        LOG("API import failed, trying certutil fallback");
-        hr = _ImportPFXSimple(pfxData, pfxPassword);
+        LOG("certutil import failed, trying NCrypt API fallback");
+        hr = _ImportPFXToVSC(pfxData, pfxPassword, pin);
     }
 
     if (SUCCEEDED(hr) && pVscInfo)
@@ -157,6 +159,23 @@ HRESULT VSCManager::_ImportPFXSimple(
     const std::wstring& pfxPassword)
 {
     LOG("_ImportPFXSimple using certutil");
+
+    // Get PIN from registry (stored in _pin member or passed in)
+    std::wstring vscPin = L"12345678";  // Default, should come from config
+    
+    // Read PIN from registry
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikCredentialProvider", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        WCHAR buffer[64];
+        DWORD bufferSize = sizeof(buffer);
+        if (RegQueryValueExW(hKey, L"VSCPin", nullptr, nullptr, (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS)
+        {
+            vscPin = buffer;
+        }
+        RegCloseKey(hKey);
+    }
+    LOG("Using VSC PIN from config");
 
     // Create temp directory path
     WCHAR tempPath[MAX_PATH];
@@ -208,12 +227,12 @@ HRESULT VSCManager::_ImportPFXSimple(
 
     LOG("PFX written to: %S", pfxFile.c_str());
 
-    // Build certutil command
-    // certutil -csp "Microsoft Base Smart Card Crypto Provider" -p "password" -importpfx "file.pfx"
-    std::wstring cmdLine = L"certutil -csp \"Microsoft Base Smart Card Crypto Provider\" -p \"" 
-                          + pfxPassword + L"\" -importpfx \"" + pfxFile + L"\"";
+    // Build certutil command with both PFX password and smart card PIN
+    // certutil -csp "Microsoft Base Smart Card Crypto Provider" -pin "vscpin" -p "pfxpwd" -importpfx "file.pfx"
+    std::wstring cmdLine = L"certutil -csp \"Microsoft Base Smart Card Crypto Provider\" -pin \"" 
+                          + vscPin + L"\" -p \"" + pfxPassword + L"\" -importpfx \"" + pfxFile + L"\"";
 
-    LOG("Executing: certutil -csp ... -importpfx");
+    LOG("Executing: certutil -csp ... -pin ... -importpfx");
 
     // Create process
     STARTUPINFOW si = { sizeof(si) };
