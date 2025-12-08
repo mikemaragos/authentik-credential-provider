@@ -8,6 +8,7 @@
 #include <credentialprovider.h>
 #include <shlwapi.h>
 #include <objbase.h>
+#include <cguid.h>  // For GUID_NULL
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "ole32.lib")
@@ -31,15 +32,18 @@ struct FIELD_STATE_PAIR
     CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE cpfis;
 };
 
+// Empty GUID for fields that don't need special handling
+static const GUID CPFG_NONE_GUID = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
+
 // Field descriptors - No password field (passwordless!)
 static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgFieldDescriptors[] =
 {
     { FID_LOGO,       CPFT_TILE_IMAGE,    const_cast<LPWSTR>(L"Logo"),                  CPFG_CREDENTIAL_PROVIDER_LOGO },
     { FID_LARGE_TEXT, CPFT_LARGE_TEXT,    const_cast<LPWSTR>(L"Authentik Passwordless"), CPFG_CREDENTIAL_PROVIDER_LABEL },
     { FID_SMALL_TEXT, CPFT_SMALL_TEXT,    const_cast<LPWSTR>(L"Enter username and OTP"), CPFG_CREDENTIAL_PROVIDER_LABEL },
-    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),              GUID_NULL },
-    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"OTP Code"),              GUID_NULL },
-    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),               GUID_NULL },
+    { FID_USERNAME,   CPFT_EDIT_TEXT,     const_cast<LPWSTR>(L"Username"),              CPFG_NONE_GUID },
+    { FID_OTP,        CPFT_PASSWORD_TEXT, const_cast<LPWSTR>(L"OTP Code"),              CPFG_NONE_GUID },
+    { FID_SUBMIT,     CPFT_SUBMIT_BUTTON, const_cast<LPWSTR>(L"Sign in"),               CPFG_NONE_GUID },
 };
 
 // Initial field state pairs
