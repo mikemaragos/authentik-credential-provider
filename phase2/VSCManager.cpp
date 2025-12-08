@@ -506,23 +506,30 @@ HRESULT VSCManager::GetVSCInfoByThumbprint(
     if (!pVscInfo)
         return E_INVALIDARG;
 
-    // First, try to enumerate containers directly from the smart card
-    // This is more reliable than certificate store lookup when running as SYSTEM
+    // Convert thumbprint to bytes for comparison
+    std::vector<BYTE> targetThumbprint;
+    for (size_t i = 0; i < thumbprint.length(); i += 2)
+    {
+        std::wstring byteStr = thumbprint.substr(i, 2);
+        BYTE b = (BYTE)wcstoul(byteStr.c_str(), nullptr, 16);
+        targetThumbprint.push_back(b);
+    }
+
+    // Enumerate containers and find the one with matching certificate
     HCRYPTPROV hProv = 0;
-    std::wstring containerName;
+    std::wstring matchedContainer;
+    std::vector<std::wstring> allContainers;
     
-    // Try to enumerate containers on the VSC using CryptoAPI
+    // First enumerate all containers
     if (CryptAcquireContextW(
         &hProv,
-        nullptr,  // Enumerate containers
-        MS_SCARD_PROV_W,  // Microsoft Base Smart Card Crypto Provider
+        nullptr,
+        MS_SCARD_PROV_W,
         PROV_RSA_FULL,
         CRYPT_VERIFYCONTEXT))
     {
         LOG("CryptAcquireContext for enumeration succeeded");
         
-        // Enumerate containers
-        DWORD dwIndex = 0;
         DWORD cbName = 0;
         BYTE bData = CRYPT_FIRST;
         
@@ -533,10 +540,7 @@ HRESULT VSCManager::GetVSCInfoByThumbprint(
             {
                 DWORD err = ::GetLastError();
                 if (err == ERROR_NO_MORE_ITEMS)
-                {
-                    LOG("No more containers");
                     break;
-                }
                 LOG("CryptGetProvParam size failed: %d", err);
                 break;
             }
@@ -548,43 +552,109 @@ HRESULT VSCManager::GetVSCInfoByThumbprint(
                 break;
             }
             
-            // Convert to wide string
             int wideLen = MultiByteToWideChar(CP_ACP, 0, nameBuffer.data(), -1, nullptr, 0);
             std::wstring container(wideLen, 0);
             MultiByteToWideChar(CP_ACP, 0, nameBuffer.data(), -1, &container[0], wideLen);
             container.resize(wcslen(container.c_str()));
             
             LOG("Found container: %S", container.c_str());
-            
-            // Use the most recent container (last one found, or one matching thumbprint pattern)
-            containerName = container;
+            allContainers.push_back(container);
             
             bData = CRYPT_NEXT;
-            dwIndex++;
         }
         
         CryptReleaseContext(hProv, 0);
     }
-    else
+    
+    // Now try to find the container that matches our certificate thumbprint
+    // Check each container by acquiring it and getting the cert
+    for (const auto& container : allContainers)
     {
-        LOG("CryptAcquireContext for enumeration failed: %d", ::GetLastError());
+        HCRYPTPROV hContainerProv = 0;
+        
+        // Build full container name with reader
+        std::wstring fullContainer = L"\\\\.\\";
+        fullContainer += _readerName;
+        fullContainer += L"\\";
+        fullContainer += container;
+        
+        // Try to acquire the specific container
+        if (CryptAcquireContextW(
+            &hContainerProv,
+            container.c_str(),  // Just container name, not full path
+            MS_SCARD_PROV_W,
+            PROV_RSA_FULL,
+            CRYPT_SILENT))
+        {
+            // Get the user key
+            HCRYPTKEY hKey = 0;
+            if (CryptGetUserKey(hContainerProv, AT_KEYEXCHANGE, &hKey))
+            {
+                // Get certificate from container
+                DWORD cbCert = 0;
+                if (CryptGetKeyParam(hKey, KP_CERTIFICATE, nullptr, &cbCert, 0))
+                {
+                    std::vector<BYTE> certData(cbCert);
+                    if (CryptGetKeyParam(hKey, KP_CERTIFICATE, certData.data(), &cbCert, 0))
+                    {
+                        // Create cert context and get thumbprint
+                        PCCERT_CONTEXT pCert = CertCreateCertificateContext(
+                            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+                            certData.data(),
+                            cbCert);
+                        
+                        if (pCert)
+                        {
+                            BYTE hash[20];
+                            DWORD hashSize = sizeof(hash);
+                            if (CertGetCertificateContextProperty(pCert, CERT_SHA1_HASH_PROP_ID, hash, &hashSize))
+                            {
+                                // Compare thumbprints
+                                if (hashSize == targetThumbprint.size() &&
+                                    memcmp(hash, targetThumbprint.data(), hashSize) == 0)
+                                {
+                                    LOG("MATCHED! Container %S matches thumbprint", container.c_str());
+                                    matchedContainer = container;
+                                }
+                            }
+                            CertFreeCertificateContext(pCert);
+                        }
+                    }
+                }
+                CryptDestroyKey(hKey);
+            }
+            CryptReleaseContext(hContainerProv, 0);
+        }
+        
+        if (!matchedContainer.empty())
+            break;
     }
     
-    // If we found a container, use it
-    if (!containerName.empty())
+    // If we found a matching container, use it
+    if (!matchedContainer.empty())
     {
-        LOG("Using enumerated container: %S", containerName.c_str());
-        pVscInfo->containerName = containerName;
+        LOG("Using matched container: %S", matchedContainer.c_str());
+        pVscInfo->containerName = matchedContainer;
+        pVscInfo->cspName = MS_SCARD_PROV_W;
+        pVscInfo->readerName = _readerName;
+        pVscInfo->cardName = L"";
+        return S_OK;
+    }
+    
+    // If no match found, use the newest container (last in list)
+    if (!allContainers.empty())
+    {
+        LOG("No thumbprint match found, using newest container: %S", allContainers.back().c_str());
+        pVscInfo->containerName = allContainers.back();
         pVscInfo->cspName = MS_SCARD_PROV_W;
         pVscInfo->readerName = _readerName;
         pVscInfo->cardName = L"";
         return S_OK;
     }
 
-    // Fallback: Try certificate store lookup (original method)
+    // Fallback: Try certificate store lookup
     LOG("Falling back to certificate store lookup");
     
-    // Try both CURRENT_USER and LOCAL_MACHINE stores
     DWORD storeFlags[] = { CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE };
     
     for (int i = 0; i < 2; i++)
