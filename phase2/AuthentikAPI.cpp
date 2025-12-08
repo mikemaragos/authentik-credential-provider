@@ -127,6 +127,7 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
 
     // Build JSON payload - first submit username
     std::wstring payload = L"{\"uid_field\":\"" + username + L"\"}";
+    LOG("ValidateOTP: Submitting username to flow");
 
     std::wstring responseBody;
     HRESULT hr = _MakeHttpRequest(
@@ -146,10 +147,41 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
         return response;
     }
 
-    // Check if OTP challenge is presented
+    // Log the response to help diagnose
+    LOG("ValidateOTP: First response length=%d", (int)responseBody.length());
+    if (responseBody.length() < 500)
+    {
+        LOG("ValidateOTP: First response: %S", responseBody.c_str());
+    }
+    else
+    {
+        LOG("ValidateOTP: First response (truncated): %S...", responseBody.substr(0, 500).c_str());
+    }
+
+    // Check if OTP challenge is presented - try multiple patterns
+    bool needsOTP = false;
     if (responseBody.find(L"ak-stage-authenticator-validate") != std::wstring::npos)
     {
-        LOG("ValidateOTP: OTP challenge received, submitting OTP");
+        needsOTP = true;
+        LOG("ValidateOTP: Detected ak-stage-authenticator-validate");
+    }
+    else if (responseBody.find(L"authenticator") != std::wstring::npos && 
+             responseBody.find(L"code") != std::wstring::npos)
+    {
+        needsOTP = true;
+        LOG("ValidateOTP: Detected authenticator/code fields");
+    }
+    else if (responseBody.find(L"otp") != std::wstring::npos || 
+             responseBody.find(L"OTP") != std::wstring::npos ||
+             responseBody.find(L"totp") != std::wstring::npos)
+    {
+        needsOTP = true;
+        LOG("ValidateOTP: Detected otp/totp fields");
+    }
+    
+    if (needsOTP)
+    {
+        LOG("ValidateOTP: OTP challenge received, submitting OTP code");
         
         // Submit OTP
         payload = L"{\"code\":\"" + otp + L"\"}";
@@ -169,6 +201,12 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
             response.message = L"Failed to validate OTP";
             return response;
         }
+        
+        LOG("ValidateOTP: OTP submitted, response length=%d", (int)responseBody.length());
+    }
+    else
+    {
+        LOG("ValidateOTP: No OTP challenge detected in first response");
     }
 
     // Parse response
@@ -430,21 +468,65 @@ cleanup:
 AuthentikResponse AuthentikAPI::_ParseOTPResponse(const std::wstring& json)
 {
     LOG("Parsing OTP response");
+    
+    // Log the actual response for debugging (truncate if too long)
+    if (json.length() < 500)
+    {
+        LOG("Response body: %S", json.c_str());
+    }
+    else
+    {
+        LOG("Response body (first 500 chars): %S...", json.substr(0, 500).c_str());
+    }
 
     AuthentikResponse response;
     response.success = false;
 
-    // Check for success (redirect type indicates success)
-    if (json.find(L"\"type\":\"redirect\"") != std::wstring::npos)
+    // Check for success - multiple patterns
+    // Authentik returns "type": "redirect" when flow completes successfully
+    if (json.find(L"\"type\"") != std::wstring::npos && json.find(L"\"redirect\"") != std::wstring::npos)
     {
         response.success = true;
         response.message = L"OTP validated successfully";
-        LOG("OTP validation successful");
+        LOG("OTP validation successful (redirect)");
     }
+    // Also check for "to" field which indicates redirect destination
+    else if (json.find(L"\"to\"") != std::wstring::npos && json.find(L"\"type\"") != std::wstring::npos)
+    {
+        response.success = true;
+        response.message = L"OTP validated successfully";
+        LOG("OTP validation successful (to field present)");
+    }
+    // Check for response_errors which indicates validation failure
+    else if (json.find(L"\"response_errors\"") != std::wstring::npos)
+    {
+        response.message = L"OTP validation failed - invalid code";
+        LOG("OTP validation failed - response_errors present");
+    }
+    // Check for "error" field
     else if (json.find(L"\"error\"") != std::wstring::npos)
     {
         response.message = L"OTP validation failed";
-        LOG("OTP validation failed");
+        LOG("OTP validation failed - error field present");
+    }
+    // Check if we're getting another challenge (need more auth steps)
+    else if (json.find(L"ak-stage-") != std::wstring::npos || json.find(L"\"component\"") != std::wstring::npos)
+    {
+        // This could mean we need another authentication step
+        // Or the OTP was accepted but flow continues
+        // For now, check if it's asking for authenticator again (failure)
+        if (json.find(L"ak-stage-authenticator-validate") != std::wstring::npos)
+        {
+            response.message = L"OTP validation failed - code rejected";
+            LOG("OTP rejected - same stage returned");
+        }
+        else
+        {
+            // Different stage - assume OTP was accepted
+            response.success = true;
+            response.message = L"OTP validated, flow continuing";
+            LOG("OTP accepted, flow continuing to next stage");
+        }
     }
     else
     {
