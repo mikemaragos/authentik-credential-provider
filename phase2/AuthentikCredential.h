@@ -7,12 +7,14 @@
 #include <windows.h>
 #include <credentialprovider.h>
 #include <shlwapi.h>
+#include <objbase.h>
 #include <strsafe.h>
 #include <shlguid.h>
 #include <string>
 #include "FieldDescriptors.h"
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "ole32.lib")
 
 // Forward declarations
 class AuthentikAPI;
