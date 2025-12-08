@@ -2,7 +2,11 @@
 // DLL entry point and COM registration - Phase 2 (Passwordless)
 // December 8, 2025
 
+// INITGUID must be defined before guiddef.h to instantiate GUIDs
+#define INITGUID
+
 #include <windows.h>
+#include <initguid.h>
 #include <unknwn.h>
 #include <shlwapi.h>
 #include <objbase.h>
