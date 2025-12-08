@@ -8,13 +8,15 @@
 #include <cryptuiapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
-#include <fstream>
+#include <objbase.h>
+#include <new>
 
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "winscard.lib")
 #pragma comment(lib, "cryptui.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "ole32.lib")
 
 // Constructor
 VSCManager::VSCManager() :
@@ -167,17 +169,41 @@ HRESULT VSCManager::_ImportPFXSimple(
     // Create temp file for PFX
     std::wstring pfxFile = std::wstring(tempPath) + L"auth_temp.pfx";
     
-    // Write PFX to temp file
+    // Write PFX to temp file using Windows API
     {
-        std::ofstream ofs(pfxFile, std::ios::binary);
-        if (!ofs)
+        HANDLE hFile = CreateFileW(
+            pfxFile.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        
+        if (hFile == INVALID_HANDLE_VALUE)
         {
-            LOG("Failed to create temp PFX file");
+            LOG("Failed to create temp PFX file: %d", GetLastError());
             _lastError = L"Failed to create temporary file";
             return E_FAIL;
         }
-        ofs.write(reinterpret_cast<const char*>(pfxData.data()), pfxData.size());
-        ofs.close();
+        
+        DWORD dwWritten = 0;
+        BOOL bResult = WriteFile(
+            hFile,
+            pfxData.data(),
+            (DWORD)pfxData.size(),
+            &dwWritten,
+            nullptr);
+        
+        CloseHandle(hFile);
+        
+        if (!bResult || dwWritten != pfxData.size())
+        {
+            LOG("Failed to write PFX file");
+            DeleteFileW(pfxFile.c_str());
+            _lastError = L"Failed to write temporary file";
+            return E_FAIL;
+        }
     }
 
     LOG("PFX written to: %S", pfxFile.c_str());
