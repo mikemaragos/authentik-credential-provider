@@ -11,12 +11,18 @@
 #include <objbase.h>
 #include <new>
 
+// Smart card crypto provider name
+#ifndef MS_SCARD_PROV_W
+#define MS_SCARD_PROV_W L"Microsoft Base Smart Card Crypto Provider"
+#endif
+
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "winscard.lib")
 #pragma comment(lib, "cryptui.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "advapi32.lib")
 
 // Constructor
 VSCManager::VSCManager() :
@@ -500,61 +506,143 @@ HRESULT VSCManager::GetVSCInfoByThumbprint(
     if (!pVscInfo)
         return E_INVALIDARG;
 
-    // Open MY store
-    HCERTSTORE hStore = CertOpenStore(
-        CERT_STORE_PROV_SYSTEM,
-        0,
-        0,
-        CERT_SYSTEM_STORE_CURRENT_USER,
-        L"MY");
-
-    if (!hStore)
+    // First, try to enumerate containers directly from the smart card
+    // This is more reliable than certificate store lookup when running as SYSTEM
+    HCRYPTPROV hProv = 0;
+    std::wstring containerName;
+    
+    // Try to enumerate containers on the VSC using CryptoAPI
+    if (CryptAcquireContextW(
+        &hProv,
+        nullptr,  // Enumerate containers
+        MS_SCARD_PROV_W,  // Microsoft Base Smart Card Crypto Provider
+        PROV_RSA_FULL,
+        CRYPT_VERIFYCONTEXT))
     {
-        LOG("Failed to open MY store: %d", ::GetLastError());
-        return E_FAIL;
-    }
-
-    // Convert thumbprint hex string to bytes
-    std::vector<BYTE> thumbprintBytes;
-    for (size_t i = 0; i < thumbprint.length(); i += 2)
-    {
-        std::wstring byteStr = thumbprint.substr(i, 2);
-        BYTE b = (BYTE)wcstoul(byteStr.c_str(), nullptr, 16);
-        thumbprintBytes.push_back(b);
-    }
-
-    // Find certificate by thumbprint
-    CRYPT_HASH_BLOB hashBlob;
-    hashBlob.cbData = (DWORD)thumbprintBytes.size();
-    hashBlob.pbData = thumbprintBytes.data();
-
-    PCCERT_CONTEXT pCert = CertFindCertificateInStore(
-        hStore,
-        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-        0,
-        CERT_FIND_SHA1_HASH,
-        &hashBlob,
-        nullptr);
-
-    HRESULT hr = E_FAIL;
-    if (pCert)
-    {
-        hr = _GetContainerFromCert(pCert, pVscInfo->containerName, pVscInfo->cspName);
-        if (SUCCEEDED(hr))
+        LOG("CryptAcquireContext for enumeration succeeded");
+        
+        // Enumerate containers
+        DWORD dwIndex = 0;
+        DWORD cbName = 0;
+        BYTE bData = CRYPT_FIRST;
+        
+        while (true)
         {
-            pVscInfo->readerName = _readerName;
-            pVscInfo->cardName = L"";
+            cbName = 0;
+            if (!CryptGetProvParam(hProv, PP_ENUMCONTAINERS, nullptr, &cbName, bData))
+            {
+                DWORD err = ::GetLastError();
+                if (err == ERROR_NO_MORE_ITEMS)
+                {
+                    LOG("No more containers");
+                    break;
+                }
+                LOG("CryptGetProvParam size failed: %d", err);
+                break;
+            }
+            
+            std::vector<char> nameBuffer(cbName);
+            if (!CryptGetProvParam(hProv, PP_ENUMCONTAINERS, (BYTE*)nameBuffer.data(), &cbName, bData))
+            {
+                LOG("CryptGetProvParam data failed: %d", ::GetLastError());
+                break;
+            }
+            
+            // Convert to wide string
+            int wideLen = MultiByteToWideChar(CP_ACP, 0, nameBuffer.data(), -1, nullptr, 0);
+            std::wstring container(wideLen, 0);
+            MultiByteToWideChar(CP_ACP, 0, nameBuffer.data(), -1, &container[0], wideLen);
+            container.resize(wcslen(container.c_str()));
+            
+            LOG("Found container: %S", container.c_str());
+            
+            // Use the most recent container (last one found, or one matching thumbprint pattern)
+            containerName = container;
+            
+            bData = CRYPT_NEXT;
+            dwIndex++;
         }
-        CertFreeCertificateContext(pCert);
+        
+        CryptReleaseContext(hProv, 0);
     }
     else
     {
-        LOG("Certificate not found by thumbprint");
-        _lastError = L"Certificate not found";
+        LOG("CryptAcquireContext for enumeration failed: %d", ::GetLastError());
+    }
+    
+    // If we found a container, use it
+    if (!containerName.empty())
+    {
+        LOG("Using enumerated container: %S", containerName.c_str());
+        pVscInfo->containerName = containerName;
+        pVscInfo->cspName = MS_SCARD_PROV_W;
+        pVscInfo->readerName = _readerName;
+        pVscInfo->cardName = L"";
+        return S_OK;
     }
 
-    CertCloseStore(hStore, 0);
-    return hr;
+    // Fallback: Try certificate store lookup (original method)
+    LOG("Falling back to certificate store lookup");
+    
+    // Try both CURRENT_USER and LOCAL_MACHINE stores
+    DWORD storeFlags[] = { CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE };
+    
+    for (int i = 0; i < 2; i++)
+    {
+        HCERTSTORE hStore = CertOpenStore(
+            CERT_STORE_PROV_SYSTEM,
+            0,
+            0,
+            storeFlags[i],
+            L"MY");
+
+        if (!hStore)
+            continue;
+
+        LOG("Searching in %s store", i == 0 ? "CURRENT_USER" : "LOCAL_MACHINE");
+
+        // Convert thumbprint hex string to bytes
+        std::vector<BYTE> thumbprintBytes;
+        for (size_t j = 0; j < thumbprint.length(); j += 2)
+        {
+            std::wstring byteStr = thumbprint.substr(j, 2);
+            BYTE b = (BYTE)wcstoul(byteStr.c_str(), nullptr, 16);
+            thumbprintBytes.push_back(b);
+        }
+
+        // Find certificate by thumbprint
+        CRYPT_HASH_BLOB hashBlob;
+        hashBlob.cbData = (DWORD)thumbprintBytes.size();
+        hashBlob.pbData = thumbprintBytes.data();
+
+        PCCERT_CONTEXT pCert = CertFindCertificateInStore(
+            hStore,
+            X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+            0,
+            CERT_FIND_SHA1_HASH,
+            &hashBlob,
+            nullptr);
+
+        if (pCert)
+        {
+            LOG("Certificate found in %s store", i == 0 ? "CURRENT_USER" : "LOCAL_MACHINE");
+            HRESULT hr = _GetContainerFromCert(pCert, pVscInfo->containerName, pVscInfo->cspName);
+            if (SUCCEEDED(hr))
+            {
+                pVscInfo->readerName = _readerName;
+                pVscInfo->cardName = L"";
+            }
+            CertFreeCertificateContext(pCert);
+            CertCloseStore(hStore, 0);
+            return hr;
+        }
+
+        CertCloseStore(hStore, 0);
+    }
+
+    LOG("Certificate not found by thumbprint in any store");
+    _lastError = L"Certificate not found";
+    return E_FAIL;
 }
 
 // Get container info from certificate
