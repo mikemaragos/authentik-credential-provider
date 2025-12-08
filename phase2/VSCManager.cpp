@@ -7,12 +7,14 @@
 #include <winscard.h>
 #include <cryptuiapi.h>
 #include <shlobj.h>
+#include <shlwapi.h>
 #include <fstream>
 
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "winscard.lib")
 #pragma comment(lib, "cryptui.lib")
+#pragma comment(lib, "shlwapi.lib")
 
 // Constructor
 VSCManager::VSCManager() :
