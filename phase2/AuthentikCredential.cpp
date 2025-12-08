@@ -16,7 +16,10 @@
 #include "CredentialPacking.h"
 #include "Logger.h"
 #include "guid.h"
+#include <shlwapi.h>
 #include <wincred.h>
+
+#pragma comment(lib, "shlwapi.lib")
 
 // Constructor
 CAuthentikCredential::CAuthentikCredential() :
