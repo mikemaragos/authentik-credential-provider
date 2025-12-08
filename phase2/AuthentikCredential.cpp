@@ -1,46 +1,69 @@
 // AuthentikCredential.cpp
 // Individual credential tile implementation - Phase 2 (Passwordless)
+// December 8, 2025
+//
+// Flow:
+// 1. User enters username + OTP
+// 2. Validate OTP with Authentik
+// 3. Request certificate from CertIssuer
+// 4. Import PFX to VSC
+// 5. Pack KERB_CERTIFICATE_LOGON and submit to LSA
+// 6. PKINIT authentication completes
 
 #include "AuthentikCredential.h"
-#include "Logger.h"
-#include "CredentialPacking.h"
 #include "AuthentikAPI.h"
 #include "VSCManager.h"
-
-// Field state pairs for passwordless logon (username + OTP only)
-static const FIELD_STATE_PAIR s_rgFieldStatePairsLogon[] =
-{
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_LOGO
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_LARGE_TEXT
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SMALL_TEXT
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_FOCUSED },  // FID_USERNAME
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_OTP
-    { CPFS_DISPLAY_IN_SELECTED_TILE, CPFIS_NONE },     // FID_SUBMIT
-};
+#include "CredentialPacking.h"
+#include "Logger.h"
+#include "guid.h"
+#include <wincred.h>
 
 // Constructor
 CAuthentikCredential::CAuthentikCredential() :
     _cRef(1),
     _cpus(CPUS_INVALID),
     _ulAuthPackage(0),
-    _pAuthentikAPI(nullptr),
-    _pVSCManager(nullptr),
     _pCredentialEvents(nullptr),
     _domain(L"test.local"),
-    _vscPin(L"12345678")
+    _vscPin(L"12345678"),
+    _pAuthentikAPI(nullptr),
+    _pVSCManager(nullptr)
 {
     DllAddRef();
-    LOG("CAuthentikCredential::Constructor (Phase 2 - Passwordless)");
+    LOG("CAuthentikCredential::Constructor");
 
     ZeroMemory(_rgFieldStrings, sizeof(_rgFieldStrings));
     ZeroMemory(&_rgFieldStatePairs, sizeof(_rgFieldStatePairs));
 
-    // Initialize API client and VSC manager
+    // Initialize API clients
     _pAuthentikAPI = new AuthentikAPI();
     _pVSCManager = new VSCManager();
-
-    // Load configuration
-    _LoadConfiguration();
+    
+    // Load domain and PIN from registry
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\AuthentikCredentialProvider", 
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        WCHAR buffer[256];
+        DWORD bufferSize = sizeof(buffer);
+        
+        if (RegQueryValueExW(hKey, L"Domain", nullptr, nullptr, 
+                            (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS)
+        {
+            _domain = buffer;
+            LOG("Domain: %S", _domain.c_str());
+        }
+        
+        bufferSize = sizeof(buffer);
+        if (RegQueryValueExW(hKey, L"VSCPin", nullptr, nullptr,
+                            (LPBYTE)buffer, &bufferSize) == ERROR_SUCCESS)
+        {
+            _vscPin = buffer;
+            LOG("VSC PIN loaded (%d chars)", _vscPin.length());
+        }
+        
+        RegCloseKey(hKey);
+    }
 }
 
 // Destructor
@@ -53,20 +76,23 @@ CAuthentikCredential::~CAuthentikCredential()
     {
         if (_rgFieldStrings[i])
         {
+            // Secure clear for OTP field
+            if (i == FID_OTP)
+            {
+                SecureZeroMemory(_rgFieldStrings[i], 
+                    wcslen(_rgFieldStrings[i]) * sizeof(wchar_t));
+            }
             CoTaskMemFree(_rgFieldStrings[i]);
             _rgFieldStrings[i] = nullptr;
         }
     }
-
-    // Clean up PIN
-    SecureZeroMemory(&_vscPin[0], _vscPin.length() * sizeof(wchar_t));
 
     if (_pAuthentikAPI)
     {
         delete _pAuthentikAPI;
         _pAuthentikAPI = nullptr;
     }
-
+    
     if (_pVSCManager)
     {
         delete _pVSCManager;
@@ -74,46 +100,6 @@ CAuthentikCredential::~CAuthentikCredential()
     }
 
     DllRelease();
-}
-
-// Load configuration from registry
-void CAuthentikCredential::_LoadConfiguration()
-{
-    LOG("Loading credential configuration");
-
-    HKEY hKey;
-    LONG result = RegOpenKeyExW(
-        HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\AuthentikCredentialProvider",
-        0,
-        KEY_READ,
-        &hKey);
-
-    if (result == ERROR_SUCCESS)
-    {
-        WCHAR buffer[256];
-        DWORD bufferSize;
-
-        // Domain
-        bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"Domain", nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _domain = buffer;
-            LOG("Domain: %S", _domain.c_str());
-        }
-
-        // VSC PIN (should be stored securely in production!)
-        bufferSize = sizeof(buffer);
-        result = RegQueryValueExW(hKey, L"VSCPin", nullptr, nullptr, (LPBYTE)buffer, &bufferSize);
-        if (result == ERROR_SUCCESS)
-        {
-            _vscPin = buffer;
-            LOG("VSC PIN: (loaded)");
-        }
-
-        RegCloseKey(hKey);
-    }
 }
 
 // IUnknown
@@ -149,25 +135,23 @@ HRESULT CAuthentikCredential::Initialize(
     const FIELD_STATE_PAIR* rgfsp,
     ULONG ulAuthPackage)
 {
-    LOG("CAuthentikCredential::Initialize (Phase 2)");
+    LOG("CAuthentikCredential::Initialize cpus=%d", cpus);
 
     _cpus = cpus;
     _ulAuthPackage = ulAuthPackage;
 
-    // Copy field descriptors and initial state
-    for (DWORD i = 0; i < ARRAYSIZE(s_rgFieldStatePairsLogon); i++)
+    // Copy field state pairs
+    for (DWORD i = 0; i < FID_NUM_FIELDS && i < ARRAYSIZE(s_rgFieldStatePairs); i++)
     {
-        _rgFieldStatePairs[i] = s_rgFieldStatePairsLogon[i];
-
-        if (rgcpfd[i].pszLabel)
-        {
-            SHStrDupW(rgcpfd[i].pszLabel, &_rgFieldStrings[i]);
-        }
+        _rgFieldStatePairs[i] = s_rgFieldStatePairs[i];
     }
 
     // Set default text
     SHStrDupW(L"Authentik Passwordless", &_rgFieldStrings[FID_LARGE_TEXT]);
     SHStrDupW(L"Enter username and OTP code", &_rgFieldStrings[FID_SMALL_TEXT]);
+
+    // Initialize VSC Manager
+    _pVSCManager->Initialize();
 
     return S_OK;
 }
@@ -182,7 +166,10 @@ HRESULT CAuthentikCredential::Advise(ICredentialProviderCredentialEvents* pcpce)
     }
     
     _pCredentialEvents = pcpce;
-    _pCredentialEvents->AddRef();
+    if (_pCredentialEvents)
+    {
+        _pCredentialEvents->AddRef();
+    }
     
     return S_OK;
 }
@@ -210,6 +197,16 @@ HRESULT CAuthentikCredential::SetSelected(BOOL* pbAutoLogon)
 HRESULT CAuthentikCredential::SetDeselected()
 {
     LOG("CAuthentikCredential::SetDeselected");
+    
+    // Clear OTP field for security
+    if (_rgFieldStrings[FID_OTP])
+    {
+        SecureZeroMemory(_rgFieldStrings[FID_OTP],
+            wcslen(_rgFieldStrings[FID_OTP]) * sizeof(wchar_t));
+        CoTaskMemFree(_rgFieldStrings[FID_OTP]);
+        _rgFieldStrings[FID_OTP] = nullptr;
+    }
+    
     return S_OK;
 }
 
@@ -218,7 +215,7 @@ HRESULT CAuthentikCredential::GetFieldState(
     CREDENTIAL_PROVIDER_FIELD_STATE* pcpfs,
     CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE* pcpfis)
 {
-    if (dwFieldID < ARRAYSIZE(_rgFieldStatePairs))
+    if (dwFieldID < FID_NUM_FIELDS)
     {
         *pcpfs = _rgFieldStatePairs[dwFieldID].cpfs;
         *pcpfis = _rgFieldStatePairs[dwFieldID].cpfis;
@@ -229,29 +226,26 @@ HRESULT CAuthentikCredential::GetFieldState(
 
 HRESULT CAuthentikCredential::GetStringValue(DWORD dwFieldID, LPWSTR* ppwsz)
 {
-    HRESULT hr = E_INVALIDARG;
-
-    if (dwFieldID < ARRAYSIZE(_rgFieldStrings) && ppwsz)
+    if (dwFieldID < FID_NUM_FIELDS && ppwsz)
     {
         if (_rgFieldStrings[dwFieldID])
         {
-            hr = SHStrDupW(_rgFieldStrings[dwFieldID], ppwsz);
+            return SHStrDupW(_rgFieldStrings[dwFieldID], ppwsz);
         }
         else
         {
             *ppwsz = nullptr;
-            hr = S_OK;
+            return S_OK;
         }
     }
-
-    return hr;
+    return E_INVALIDARG;
 }
 
 HRESULT CAuthentikCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
 {
     if (dwFieldID == FID_LOGO)
     {
-        *phbmp = nullptr;
+        *phbmp = nullptr;  // Use default
         return S_OK;
     }
     return E_INVALIDARG;
@@ -284,21 +278,15 @@ HRESULT CAuthentikCredential::GetSubmitButtonValue(DWORD dwFieldID, DWORD* pdwAd
 
 HRESULT CAuthentikCredential::SetStringValue(DWORD dwFieldID, LPCWSTR pwz)
 {
-    HRESULT hr = E_INVALIDARG;
-
-    if (dwFieldID < ARRAYSIZE(_rgFieldStrings))
+    if (dwFieldID < FID_NUM_FIELDS)
     {
         if (_rgFieldStrings[dwFieldID])
         {
             CoTaskMemFree(_rgFieldStrings[dwFieldID]);
         }
-
-        hr = SHStrDupW(pwz, &_rgFieldStrings[dwFieldID]);
-        
-        LOG("SetStringValue: field=%d", dwFieldID);
+        return SHStrDupW(pwz ? pwz : L"", &_rgFieldStrings[dwFieldID]);
     }
-
-    return hr;
+    return E_INVALIDARG;
 }
 
 HRESULT CAuthentikCredential::SetCheckboxValue(DWORD dwFieldID, BOOL bChecked)
@@ -316,14 +304,16 @@ HRESULT CAuthentikCredential::CommandLinkClicked(DWORD dwFieldID)
     return E_NOTIMPL;
 }
 
+// Main serialization - triggers authentication flow
 HRESULT CAuthentikCredential::GetSerialization(
     CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
     CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
     LPWSTR* ppwszOptionalStatusText,
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
-    LOG("CAuthentikCredential::GetSerialization (Phase 2)");
-    return _HandleAuthentication(pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
+    LOG("CAuthentikCredential::GetSerialization");
+
+    return _DoAuthentication(pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
 }
 
 HRESULT CAuthentikCredential::ReportResult(
@@ -332,34 +322,45 @@ HRESULT CAuthentikCredential::ReportResult(
     LPWSTR* ppwszOptionalStatusText,
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
-    LOG("CAuthentikCredential::ReportResult - status=0x%08x, substatus=0x%08x", ntsStatus, ntsSubstatus);
+    LOG("CAuthentikCredential::ReportResult status=0x%08x, substatus=0x%08x", 
+        ntsStatus, ntsSubstatus);
     
     *ppwszOptionalStatusText = nullptr;
     *pcpsiOptionalStatusIcon = CPSI_NONE;
 
+    if (ntsStatus != 0)
+    {
+        // Authentication failed
+        SHStrDupW(L"Authentication failed. Check username and OTP.", ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+    }
+
     return S_OK;
 }
 
-// Main authentication handler
-HRESULT CAuthentikCredential::_HandleAuthentication(
+// Main authentication flow
+HRESULT CAuthentikCredential::_DoAuthentication(
     CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
     CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
     LPWSTR* ppwszOptionalStatusText,
     CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
 {
-    LOG("_HandleAuthentication (Passwordless)");
+    LOG("_DoAuthentication - Phase 2 Passwordless Flow");
+
+    HRESULT hr = E_FAIL;
 
     // Get username and OTP
     std::wstring username = _rgFieldStrings[FID_USERNAME] ? _rgFieldStrings[FID_USERNAME] : L"";
     std::wstring otp = _rgFieldStrings[FID_OTP] ? _rgFieldStrings[FID_OTP] : L"";
 
-    // Validate input
+    LOG("Username: %S, OTP length: %d", username.c_str(), otp.length());
+
     if (username.empty())
     {
         SHStrDupW(L"Please enter a username", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-        return E_FAIL;
+        return S_OK;
     }
 
     if (otp.empty())
@@ -367,135 +368,132 @@ HRESULT CAuthentikCredential::_HandleAuthentication(
         SHStrDupW(L"Please enter your OTP code", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-        return E_FAIL;
+        return S_OK;
     }
 
     // Update status
-    if (_pCredentialEvents)
-    {
-        _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Authenticating...");
-    }
+    _SetStatusText(L"Validating OTP...");
 
-    LOG("Authenticating user: %S with OTP", username.c_str());
-
-    // Step 1: Validate OTP and get certificate from Authentik
+    // Step 1 & 2: Validate OTP and get certificate
+    LOG("Step 1-2: Authenticating and requesting certificate");
     CertificateResponse certResponse = _pAuthentikAPI->AuthenticateAndGetCertificate(
         username, otp, _domain);
 
     if (!certResponse.success)
     {
-        LOG("Authentication failed: %S", certResponse.message.c_str());
+        LOG("Authentication/certificate request failed: %S", certResponse.message.c_str());
         SHStrDupW(certResponse.message.c_str(), ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-
-        // Clear OTP field
-        if (_rgFieldStrings[FID_OTP])
-        {
-            CoTaskMemFree(_rgFieldStrings[FID_OTP]);
-            _rgFieldStrings[FID_OTP] = nullptr;
-        }
-        if (_pCredentialEvents)
-        {
-            _pCredentialEvents->SetFieldString(this, FID_OTP, L"");
-            _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Enter username and OTP code");
-        }
-
-        return E_FAIL;
+        return S_OK;
     }
 
-    LOG("OTP validated, certificate received: %d bytes", certResponse.certificateDer.size());
+    LOG("Certificate received: %d bytes PFX, SKI=%S", 
+        certResponse.pfxData.size(), 
+        certResponse.subjectKeyIdentifier.c_str());
 
     // Update status
-    if (_pCredentialEvents)
-    {
-        _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Importing certificate...");
-    }
+    _SetStatusText(L"Importing certificate...");
 
-    // Step 2: Import certificate to VSC
+    // Step 3: Import PFX to VSC
+    LOG("Step 3: Importing PFX to VSC");
     VSCInfo vscInfo;
-    HRESULT hr = _pVSCManager->ImportCertificate(
-        certResponse.certificateDer,
-        certResponse.privateKeyBlob,
+    hr = _pVSCManager->ImportPFX(
+        certResponse.pfxData,
+        certResponse.pfxPassword,
         _vscPin,
         &vscInfo);
 
     if (FAILED(hr))
     {
-        LOG("Failed to import certificate to VSC: 0x%08x", hr);
-        SHStrDupW(L"Failed to import certificate", ppwszOptionalStatusText);
+        LOG("PFX import failed: 0x%08x - %S", hr, _pVSCManager->GetLastError().c_str());
+        SHStrDupW(L"Failed to import certificate to smart card", ppwszOptionalStatusText);
+        *pcpsiOptionalStatusIcon = CPSI_ERROR;
+        *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+        return S_OK;
+    }
+
+    // Fill in VSC info if not already populated
+    if (vscInfo.readerName.empty())
+        vscInfo.readerName = _pVSCManager->GetReaderName();
+    if (vscInfo.cspName.empty())
+        vscInfo.cspName = L"Microsoft Base Smart Card Crypto Provider";
+    if (vscInfo.containerName.empty())
+    {
+        // Try to get container from imported cert
+        _pVSCManager->GetVSCInfoByThumbprint(certResponse.thumbprint, &vscInfo);
+    }
+
+    LOG("VSC Info: reader=%S, container=%S, csp=%S",
+        vscInfo.readerName.c_str(),
+        vscInfo.containerName.c_str(),
+        vscInfo.cspName.c_str());
+
+    // Update status
+    _SetStatusText(L"Authenticating...");
+
+    // Step 4: Pack KERB_CERTIFICATE_LOGON
+    LOG("Step 4: Packing KERB_CERTIFICATE_LOGON");
+    BYTE* pPackage = nullptr;
+    DWORD cbPackage = 0;
+
+    if (_cpus == CPUS_UNLOCK_WORKSTATION)
+    {
+        hr = PackKerbCertificateUnlockLogon(
+            username,
+            _domain,
+            _vscPin,
+            vscInfo,
+            &pPackage,
+            &cbPackage);
+    }
+    else
+    {
+        hr = PackKerbCertificateLogon(
+            username,
+            _domain,
+            _vscPin,
+            vscInfo,
+            &pPackage,
+            &cbPackage);
+    }
+
+    if (FAILED(hr))
+    {
+        LOG("Credential packing failed: 0x%08x", hr);
+        SHStrDupW(L"Failed to prepare credentials", ppwszOptionalStatusText);
         *pcpsiOptionalStatusIcon = CPSI_ERROR;
         *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         return hr;
     }
 
-    LOG("Certificate imported to VSC: reader=%S, container=%S",
-        vscInfo.readerName.c_str(), vscInfo.containerName.c_str());
+    // Step 5: Fill serialization structure
+    LOG("Step 5: Submitting to LSA for PKINIT");
+    pcpcs->clsidCredentialProvider = CLSID_AuthentikCredentialProvider;
+    pcpcs->rgbSerialization = pPackage;
+    pcpcs->cbSerialization = cbPackage;
+    pcpcs->ulAuthenticationPackage = _ulAuthPackage;
 
-    // Update status
-    if (_pCredentialEvents)
+    *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
+    *pcpsiOptionalStatusIcon = CPSI_SUCCESS;
+
+    LOG("Authentication package submitted successfully");
+
+    // Clear OTP from memory
+    if (_rgFieldStrings[FID_OTP])
     {
-        _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, L"Logging in...");
+        SecureZeroMemory(_rgFieldStrings[FID_OTP],
+            wcslen(_rgFieldStrings[FID_OTP]) * sizeof(wchar_t));
     }
 
-    // Step 3: Pack smart card credentials for PKINIT
-    hr = _PackSmartCardCredentials(
-        username, _domain, vscInfo,
-        pcpgsr, pcpcs, ppwszOptionalStatusText, pcpsiOptionalStatusIcon);
-
-    return hr;
+    return S_OK;
 }
 
-// Pack smart card credentials for PKINIT authentication
-HRESULT CAuthentikCredential::_PackSmartCardCredentials(
-    const std::wstring& username,
-    const std::wstring& domain,
-    const VSCInfo& vscInfo,
-    CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
-    CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
-    LPWSTR* ppwszOptionalStatusText,
-    CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon)
+// Update status text in UI
+void CAuthentikCredential::_SetStatusText(LPCWSTR text)
 {
-    LOG("_PackSmartCardCredentials");
-
-    BYTE* pPackage = nullptr;
-    DWORD cbPackage = 0;
-
-    // Choose logon vs unlock based on usage scenario
-    HRESULT hr;
-    if (_cpus == CPUS_UNLOCK_WORKSTATION)
+    if (_pCredentialEvents && text)
     {
-        hr = PackKerbCertificateUnlockLogon(
-            username, domain, _vscPin, vscInfo,
-            &pPackage, &cbPackage);
+        _pCredentialEvents->SetFieldString(this, FID_SMALL_TEXT, text);
     }
-    else
-    {
-        hr = PackKerbCertificateLogon(
-            username, domain, _vscPin, vscInfo,
-            &pPackage, &cbPackage);
-    }
-
-    if (SUCCEEDED(hr))
-    {
-        // Fill serialization structure
-        pcpcs->clsidCredentialProvider = CLSID_AuthentikCredentialProvider;
-        pcpcs->rgbSerialization = pPackage;
-        pcpcs->cbSerialization = cbPackage;
-        pcpcs->ulAuthenticationPackage = _ulAuthPackage;
-
-        *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
-        *pcpsiOptionalStatusIcon = CPSI_SUCCESS;
-
-        LOG("Smart card credentials packed successfully: %d bytes", cbPackage);
-    }
-    else
-    {
-        LOG("Failed to pack smart card credentials: 0x%08x", hr);
-        SHStrDupW(L"Failed to prepare credentials", ppwszOptionalStatusText);
-        *pcpsiOptionalStatusIcon = CPSI_ERROR;
-        *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-    }
-
-    return hr;
 }
