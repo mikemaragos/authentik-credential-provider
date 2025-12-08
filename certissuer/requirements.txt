@@ -1,0 +1,7 @@
+# CertIssuer Requirements
+flask>=2.0.0
+cryptography>=3.4.0
+ldap3>=2.9.0
+requests>=2.25.0
+requests-ntlm>=1.1.0
+pyOpenSSL>=21.0.0
