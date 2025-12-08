@@ -4,8 +4,16 @@
 
 #pragma once
 
-#include <credentialprovider.h>
 #include <windows.h>
+#include <credentialprovider.h>
+#include <shlwapi.h>
+
+#pragma comment(lib, "shlwapi.lib")
+
+// Define CPFG_NONE if not defined in SDK
+#ifndef CPFG_NONE
+#define CPFG_NONE GUID_NULL
+#endif
 
 // Field IDs - Simplified for passwordless OTP authentication
 enum FIELD_ID
