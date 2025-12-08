@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-// KERB_CERTIFICATE_LOGON message types (from NTSecAPI.h if not defined)
+// KERB_CERTIFICATE_LOGON message types
 #ifndef KerbCertificateLogon
 #define KerbCertificateLogon 11
 #endif
@@ -18,10 +18,18 @@
 #define KerbCertificateUnlockLogon 12
 #endif
 
+// VSC (Virtual Smart Card) information - single definition
+struct VSCInfo {
+    std::wstring readerName;      // e.g., "Microsoft Virtual Smart Card 0"
+    std::wstring containerName;   // Key container name
+    std::wstring cspName;         // "Microsoft Base Smart Card Crypto Provider"
+    std::wstring cardName;        // Card name (can be empty)
+};
+
 // KERB_SMARTCARD_CSP_INFO structure
 // This structure is not fully documented in the SDK
 #pragma pack(push, 1)
-typedef struct _KERB_SMARTCARD_CSP_INFO {
+typedef struct _MY_KERB_SMARTCARD_CSP_INFO {
     DWORD dwCspInfoLen;         // Total length of this structure including strings
     DWORD MessageType;          // Must be 1
     union {
@@ -35,33 +43,25 @@ typedef struct _KERB_SMARTCARD_CSP_INFO {
     ULONG nContainerNameOffset; // Offset to container name in bBuffer
     ULONG nCSPNameOffset;       // Offset to CSP name in bBuffer
     WCHAR bBuffer[1];           // Variable length buffer containing strings
-} KERB_SMARTCARD_CSP_INFO, *PKERB_SMARTCARD_CSP_INFO;
+} MY_KERB_SMARTCARD_CSP_INFO, *PMY_KERB_SMARTCARD_CSP_INFO;
 #pragma pack(pop)
 
-// KERB_CERTIFICATE_LOGON structure
-typedef struct _KERB_CERTIFICATE_LOGON {
+// KERB_CERTIFICATE_LOGON structure (custom definition to avoid SDK conflicts)
+typedef struct _MY_KERB_CERTIFICATE_LOGON {
     KERB_LOGON_SUBMIT_TYPE MessageType;  // KerbCertificateLogon or KerbCertificateUnlockLogon
     UNICODE_STRING DomainName;
     UNICODE_STRING UserName;
     UNICODE_STRING Pin;
     ULONG Flags;                // 0
     ULONG CspDataLength;        // Size of CspData
-    PUCHAR CspData;             // Points to KERB_SMARTCARD_CSP_INFO
-} KERB_CERTIFICATE_LOGON, *PKERB_CERTIFICATE_LOGON;
+    PUCHAR CspData;             // Points to MY_KERB_SMARTCARD_CSP_INFO
+} MY_KERB_CERTIFICATE_LOGON, *PMY_KERB_CERTIFICATE_LOGON;
 
 // KERB_CERTIFICATE_UNLOCK_LOGON structure (for unlock scenarios)
-typedef struct _KERB_CERTIFICATE_UNLOCK_LOGON {
-    KERB_CERTIFICATE_LOGON Logon;
+typedef struct _MY_KERB_CERTIFICATE_UNLOCK_LOGON {
+    MY_KERB_CERTIFICATE_LOGON Logon;
     LUID LogonId;
-} KERB_CERTIFICATE_UNLOCK_LOGON, *PKERB_CERTIFICATE_UNLOCK_LOGON;
-
-// VSC (Virtual Smart Card) information
-struct VSCInfo {
-    std::wstring readerName;      // e.g., "Microsoft Virtual Smart Card 0"
-    std::wstring containerName;   // Key container name
-    std::wstring cspName;         // "Microsoft Base Smart Card Crypto Provider"
-    std::wstring cardName;        // Card name (can be empty)
-};
+} MY_KERB_CERTIFICATE_UNLOCK_LOGON, *PMY_KERB_CERTIFICATE_UNLOCK_LOGON;
 
 // Pack credentials for smart card certificate logon
 HRESULT PackKerbCertificateLogon(
