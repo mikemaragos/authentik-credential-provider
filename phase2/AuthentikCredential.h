@@ -1,5 +1,6 @@
 // AuthentikCredential.h
 // Header for individual credential tile - Phase 2 (Passwordless)
+// December 8, 2025
 
 #pragma once
 
@@ -9,7 +10,6 @@
 #include <shlguid.h>
 #include <string>
 #include "FieldDescriptors.h"
-#include "CredentialPacking.h"
 
 // Forward declarations
 class AuthentikAPI;
@@ -39,11 +39,23 @@ public:
     IFACEMETHODIMP SetCheckboxValue(DWORD dwFieldID, BOOL bChecked);
     IFACEMETHODIMP SetComboBoxSelectedValue(DWORD dwFieldID, DWORD dwSelectedItem);
     IFACEMETHODIMP CommandLinkClicked(DWORD dwFieldID);
-    IFACEMETHODIMP GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
-    IFACEMETHODIMP ReportResult(NTSTATUS ntsStatus, NTSTATUS ntsSubstatus, LPWSTR* ppwszOptionalStatusText, CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
+    IFACEMETHODIMP GetSerialization(
+        CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, 
+        CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, 
+        LPWSTR* ppwszOptionalStatusText, 
+        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
+    IFACEMETHODIMP ReportResult(
+        NTSTATUS ntsStatus, 
+        NTSTATUS ntsSubstatus, 
+        LPWSTR* ppwszOptionalStatusText, 
+        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
 
     // Initialize credential
-    HRESULT Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd, const FIELD_STATE_PAIR* rgfsp, ULONG ulAuthPackage);
+    HRESULT Initialize(
+        CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, 
+        const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR* rgcpfd, 
+        const FIELD_STATE_PAIR* rgfsp, 
+        ULONG ulAuthPackage);
 
     friend HRESULT CAuthentikCredential_CreateInstance(REFIID riid, void** ppv);
 
@@ -52,25 +64,15 @@ protected:
     ~CAuthentikCredential();
 
 private:
-    // Main authentication handler
-    HRESULT _HandleAuthentication(
-        CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr, 
-        CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs, 
-        LPWSTR* ppwszOptionalStatusText, 
-        CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
-
-    // Pack smart card credentials
-    HRESULT _PackSmartCardCredentials(
-        const std::wstring& username,
-        const std::wstring& domain,
-        const VSCInfo& vscInfo,
+    // Main authentication flow
+    HRESULT _DoAuthentication(
         CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* pcpgsr,
         CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* pcpcs,
         LPWSTR* ppwszOptionalStatusText,
         CREDENTIAL_PROVIDER_STATUS_ICON* pcpsiOptionalStatusIcon);
 
-    // Load configuration from registry
-    void _LoadConfiguration();
+    // Update status text
+    void _SetStatusText(LPCWSTR text);
 
     LONG _cRef;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus;
@@ -79,11 +81,11 @@ private:
     ULONG _ulAuthPackage;
     ICredentialProviderCredentialEvents* _pCredentialEvents;
     
+    // Configuration from registry
+    std::wstring _domain;
+    std::wstring _vscPin;
+    
     // API clients
     AuthentikAPI* _pAuthentikAPI;
     VSCManager* _pVSCManager;
-
-    // Configuration
-    std::wstring _domain;
-    std::wstring _vscPin;
 };
