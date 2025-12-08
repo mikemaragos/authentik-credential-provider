@@ -5,10 +5,12 @@
 
 #include "CredentialPacking.h"
 #include "Logger.h"
+#include <objbase.h>
 #include <strsafe.h>
 
 #pragma comment(lib, "Secur32.lib")
 #pragma comment(lib, "Advapi32.lib")
+#pragma comment(lib, "ole32.lib")
 
 // Helper: Initialize UNICODE_STRING with pointer adjustment for serialization
 static void InitUnicodeStringRelative(
