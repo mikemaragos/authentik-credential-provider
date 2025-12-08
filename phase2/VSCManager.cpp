@@ -162,8 +162,8 @@ HRESULT VSCManager::_ImportPFXSimple(
     WCHAR tempPath[MAX_PATH];
     if (GetTempPathW(MAX_PATH, tempPath) == 0)
     {
-        LOG("GetTempPath failed: %d", GetLastError());
-        return HRESULT_FROM_WIN32(GetLastError());
+        LOG("GetTempPath failed: %d", ::GetLastError());
+        return HRESULT_FROM_WIN32(::GetLastError());
     }
 
     // Create temp file for PFX
@@ -182,7 +182,7 @@ HRESULT VSCManager::_ImportPFXSimple(
         
         if (hFile == INVALID_HANDLE_VALUE)
         {
-            LOG("Failed to create temp PFX file: %d", GetLastError());
+            LOG("Failed to create temp PFX file: %d", ::GetLastError());
             _lastError = L"Failed to create temporary file";
             return E_FAIL;
         }
@@ -240,10 +240,10 @@ HRESULT VSCManager::_ImportPFXSimple(
 
     if (!bResult)
     {
-        LOG("CreateProcess failed: %d", GetLastError());
+        LOG("CreateProcess failed: %d", ::GetLastError());
         DeleteFileW(pfxFile.c_str());
         _lastError = L"Failed to execute certutil";
-        return HRESULT_FROM_WIN32(GetLastError());
+        return HRESULT_FROM_WIN32(::GetLastError());
     }
 
     // Wait for completion (timeout 30 seconds)
@@ -332,7 +332,7 @@ HRESULT VSCManager::_ImportPFXToVSC(
 
     if (!hStore)
     {
-        DWORD dwError = GetLastError();
+        DWORD dwError = ::GetLastError();
         LOG("PFXImportCertStore failed: %d", dwError);
         NCryptFreeObject(hProvider);
         return HRESULT_FROM_WIN32(dwError);
@@ -358,7 +358,7 @@ HRESULT VSCManager::_ImportPFXToVSC(
                 CERT_STORE_ADD_REPLACE_EXISTING,
                 nullptr))
             {
-                LOG("CertAddCertificateContextToStore failed: %d", GetLastError());
+                LOG("CertAddCertificateContextToStore failed: %d", ::GetLastError());
             }
             else
             {
@@ -395,7 +395,7 @@ HRESULT VSCManager::_ImportPFXWithCertStore(
 
     if (!hPfxStore)
     {
-        DWORD dwError = GetLastError();
+        DWORD dwError = ::GetLastError();
         LOG("PFXImportCertStore failed: %d", dwError);
         _lastError = L"Failed to import PFX";
         return HRESULT_FROM_WIN32(dwError);
@@ -459,7 +459,7 @@ HRESULT VSCManager::_ImportPFXWithCertStore(
         }
         else
         {
-            LOG("Failed to add certificate to MY store: %d", GetLastError());
+            LOG("Failed to add certificate to MY store: %d", ::GetLastError());
             _lastError = L"Failed to add certificate to store";
         }
         CertCloseStore(hMyStore, 0);
@@ -491,7 +491,7 @@ HRESULT VSCManager::GetVSCInfoByThumbprint(
 
     if (!hStore)
     {
-        LOG("Failed to open MY store: %d", GetLastError());
+        LOG("Failed to open MY store: %d", ::GetLastError());
         return E_FAIL;
     }
 
@@ -553,7 +553,7 @@ HRESULT VSCManager::_GetContainerFromCert(
         nullptr,
         &cbData))
     {
-        LOG("Failed to get key prov info size: %d", GetLastError());
+        LOG("Failed to get key prov info size: %d", ::GetLastError());
         return E_FAIL;
     }
 
@@ -564,7 +564,7 @@ HRESULT VSCManager::_GetContainerFromCert(
         &buffer[0],
         &cbData))
     {
-        LOG("Failed to get key prov info: %d", GetLastError());
+        LOG("Failed to get key prov info: %d", ::GetLastError());
         return E_FAIL;
     }
 
