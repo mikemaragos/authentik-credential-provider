@@ -1,15 +1,23 @@
 // VSCManager.h
-// Virtual Smart Card Manager - handles VSC operations for certificate import
+// Virtual Smart Card Manager - handles PFX import to VSC
+// Phase 2: December 8, 2025
 
 #pragma once
 
 #include <windows.h>
 #include <wincrypt.h>
+#include <ncrypt.h>
 #include <string>
 #include <vector>
-#include "CredentialPacking.h"
 
-// VSC Manager class
+// VSC (Virtual Smart Card) information for KERB_CERTIFICATE_LOGON
+struct VSCInfo {
+    std::wstring readerName;      // e.g., "Microsoft Virtual Smart Card 0"
+    std::wstring containerName;   // Key container name
+    std::wstring cspName;         // "Microsoft Base Smart Card Crypto Provider"
+    std::wstring cardName;        // Card name
+};
+
 class VSCManager
 {
 public:
@@ -19,54 +27,56 @@ public:
     // Initialize and find existing VSC
     HRESULT Initialize();
 
-    // Import certificate and private key to VSC
-    // Returns VSCInfo for use with KERB_CERTIFICATE_LOGON
-    HRESULT ImportCertificate(
-        const std::vector<BYTE>& certificateDer,
-        const std::vector<BYTE>& privateKeyBlob,
+    // Import PFX to VSC - main method for credential provider
+    // Takes PFX data + password, imports to VSC, returns VSCInfo for PKINIT
+    HRESULT ImportPFX(
+        const std::vector<BYTE>& pfxData,
+        const std::wstring& pfxPassword,
         const std::wstring& pin,
         VSCInfo* pVscInfo);
 
-    // Get VSC info for existing certificate
-    HRESULT GetVSCInfo(const std::wstring& username, VSCInfo* pVscInfo);
+    // Get VSC info for existing certificate by thumbprint
+    HRESULT GetVSCInfoByThumbprint(
+        const std::wstring& thumbprint,
+        VSCInfo* pVscInfo);
 
-    // Check if VSC exists and has valid certificate
-    bool HasValidCertificate(const std::wstring& username);
-
-    // Delete certificate from VSC
-    HRESULT DeleteCertificate(const std::wstring& containerName);
+    // Check if VSC is available
+    bool IsVSCAvailable() const { return _initialized && !_readerName.empty(); }
 
     // Get the reader name for the VSC
     std::wstring GetReaderName() const { return _readerName; }
+
+    // Get last error message
+    std::wstring GetLastError() const { return _lastError; }
 
 private:
     // Find VSC reader
     HRESULT _FindVSCReader();
 
-    // Create container in VSC
-    HRESULT _CreateContainer(
-        const std::wstring& containerName,
-        HCRYPTPROV* phProv);
+    // Import PFX using CryptUIWizImport (simple method)
+    HRESULT _ImportPFXSimple(
+        const std::vector<BYTE>& pfxData,
+        const std::wstring& pfxPassword);
 
-    // Import private key to container
-    HRESULT _ImportPrivateKey(
-        HCRYPTPROV hProv,
-        const std::vector<BYTE>& privateKeyBlob);
+    // Import PFX using NCrypt APIs (for VSC targeting)
+    HRESULT _ImportPFXToVSC(
+        const std::vector<BYTE>& pfxData,
+        const std::wstring& pfxPassword,
+        const std::wstring& pin);
 
-    // Import certificate to MY store with link to container
-    HRESULT _ImportCertificateToStore(
-        const std::vector<BYTE>& certificateDer,
-        const std::wstring& containerName,
-        const std::wstring& cspName);
+    // Get container name from imported certificate
+    HRESULT _GetContainerFromCert(
+        PCCERT_CONTEXT pCertContext,
+        std::wstring& containerName,
+        std::wstring& cspName);
 
-    // Parse PKCS#8 private key to get raw key blob
-    HRESULT _ParsePKCS8ToKeyBlob(
-        const std::vector<BYTE>& pkcs8,
-        std::vector<BYTE>& keyBlob);
+    // Find certificate in MY store by criteria
+    PCCERT_CONTEXT _FindCertificateInStore(
+        const std::wstring& upn);
 
     // Configuration
     std::wstring _readerName;
     std::wstring _cspName;
-    std::wstring _cardName;
+    std::wstring _lastError;
     bool _initialized;
 };
