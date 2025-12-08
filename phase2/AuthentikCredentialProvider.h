@@ -4,12 +4,15 @@
 
 #pragma once
 
-#include <credentialprovider.h>
 #include <windows.h>
+#include <credentialprovider.h>
+#include <shlwapi.h>
 #include <strsafe.h>
 #include <shlguid.h>
 #include <NTSecAPI.h>
 #include "FieldDescriptors.h"
+
+#pragma comment(lib, "shlwapi.lib")
 
 class CAuthentikCredential;
 
