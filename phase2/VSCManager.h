@@ -9,14 +9,7 @@
 #include <ncrypt.h>
 #include <string>
 #include <vector>
-
-// VSC (Virtual Smart Card) information for KERB_CERTIFICATE_LOGON
-struct VSCInfo {
-    std::wstring readerName;      // e.g., "Microsoft Virtual Smart Card 0"
-    std::wstring containerName;   // Key container name
-    std::wstring cspName;         // "Microsoft Base Smart Card Crypto Provider"
-    std::wstring cardName;        // Card name
-};
+#include "CredentialPacking.h"  // For VSCInfo struct
 
 class VSCManager
 {
@@ -63,6 +56,11 @@ private:
         const std::vector<BYTE>& pfxData,
         const std::wstring& pfxPassword,
         const std::wstring& pin);
+
+    // Import PFX using CertStore API (fallback)
+    HRESULT _ImportPFXWithCertStore(
+        const std::vector<BYTE>& pfxData,
+        const std::wstring& pfxPassword);
 
     // Get container name from imported certificate
     HRESULT _GetContainerFromCert(
