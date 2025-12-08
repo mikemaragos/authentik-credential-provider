@@ -64,7 +64,7 @@ public:
 
     friend HRESULT CAuthentikCredential_CreateInstance(REFIID riid, void** ppv);
 
-protected:
+public:
     CAuthentikCredential();
     ~CAuthentikCredential();
 
