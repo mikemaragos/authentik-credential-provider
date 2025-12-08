@@ -125,12 +125,39 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
     // Build request URL for Authentik flow
     std::wstring url = L"/api/v3/flows/executor/" + _flowSlug + L"/";
 
-    // Build JSON payload - first submit username
-    std::wstring payload = L"{\"uid_field\":\"" + username + L"\"}";
-    LOG("ValidateOTP: Submitting username to flow");
-
     std::wstring responseBody;
-    HRESULT hr = _MakeHttpRequest(
+    std::wstring payload;
+    HRESULT hr;
+
+    // Step 1: GET the flow to initialize and see what stage we're on
+    LOG("ValidateOTP: Step 1 - GET flow to initialize");
+    hr = _MakeHttpRequest(
+        _authentikServer,
+        _authentikPort,
+        _useHttps,
+        L"GET",
+        url,
+        L"",
+        L"",
+        responseBody);
+
+    if (FAILED(hr))
+    {
+        LOG("ValidateOTP: GET flow failed: 0x%08x", hr);
+        response.message = L"Failed to connect to authentication server";
+        return response;
+    }
+
+    LOG("ValidateOTP: GET response length=%d", (int)responseBody.length());
+    if (responseBody.length() < 300)
+    {
+        LOG("ValidateOTP: GET response: %S", responseBody.c_str());
+    }
+
+    // Step 2: POST username to identification stage
+    LOG("ValidateOTP: Step 2 - POST username");
+    payload = L"{\"uid_field\":\"" + username + L"\"}";
+    hr = _MakeHttpRequest(
         _authentikServer,
         _authentikPort,
         _useHttps,
@@ -142,74 +169,71 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
 
     if (FAILED(hr))
     {
-        LOG("ValidateOTP: username submission failed: 0x%08x", hr);
-        response.message = L"Failed to connect to authentication server";
+        LOG("ValidateOTP: POST username failed: 0x%08x", hr);
+        response.message = L"Failed to submit username";
         return response;
     }
 
-    // Log the response to help diagnose
-    LOG("ValidateOTP: First response length=%d", (int)responseBody.length());
+    LOG("ValidateOTP: Username response length=%d", (int)responseBody.length());
     if (responseBody.length() < 500)
     {
-        LOG("ValidateOTP: First response: %S", responseBody.c_str());
+        LOG("ValidateOTP: Username response: %S", responseBody.c_str());
     }
     else
     {
-        LOG("ValidateOTP: First response (truncated): %S...", responseBody.substr(0, 500).c_str());
+        LOG("ValidateOTP: Username response (truncated): %S...", responseBody.substr(0, 500).c_str());
     }
 
-    // Check if OTP challenge is presented - try multiple patterns
-    bool needsOTP = false;
-    if (responseBody.find(L"ak-stage-authenticator-validate") != std::wstring::npos)
+    // Check if we got a redirect (no password/OTP required)
+    if (responseBody.find(L"\"type\"") != std::wstring::npos && 
+        responseBody.find(L"\"redirect\"") != std::wstring::npos)
     {
-        needsOTP = true;
-        LOG("ValidateOTP: Detected ak-stage-authenticator-validate");
+        LOG("ValidateOTP: Got redirect after username - flow complete");
+        response.success = true;
+        response.message = L"Authentication successful";
+        return response;
     }
-    else if (responseBody.find(L"authenticator") != std::wstring::npos && 
-             responseBody.find(L"code") != std::wstring::npos)
-    {
-        needsOTP = true;
-        LOG("ValidateOTP: Detected authenticator/code fields");
-    }
-    else if (responseBody.find(L"otp") != std::wstring::npos || 
-             responseBody.find(L"OTP") != std::wstring::npos ||
-             responseBody.find(L"totp") != std::wstring::npos)
-    {
-        needsOTP = true;
-        LOG("ValidateOTP: Detected otp/totp fields");
-    }
-    
-    if (needsOTP)
-    {
-        LOG("ValidateOTP: OTP challenge received, submitting OTP code");
-        
-        // Submit OTP
-        payload = L"{\"code\":\"" + otp + L"\"}";
-        hr = _MakeHttpRequest(
-            _authentikServer,
-            _authentikPort,
-            _useHttps,
-            L"POST",
-            url,
-            payload,
-            L"",
-            responseBody);
 
-        if (FAILED(hr))
-        {
-            LOG("ValidateOTP: OTP submission failed: 0x%08x", hr);
-            response.message = L"Failed to validate OTP";
-            return response;
-        }
-        
-        LOG("ValidateOTP: OTP submitted, response length=%d", (int)responseBody.length());
+    // Check if password stage is shown (we need to skip or handle)
+    if (responseBody.find(L"ak-stage-password") != std::wstring::npos ||
+        responseBody.find(L"\"password\"") != std::wstring::npos)
+    {
+        LOG("ValidateOTP: Password stage detected - flow not configured for passwordless");
+        response.message = L"Flow requires password - configure for passwordless";
+        return response;
+    }
+
+    // Step 3: POST OTP code
+    LOG("ValidateOTP: Step 3 - POST OTP code");
+    payload = L"{\"code\":\"" + otp + L"\"}";
+    hr = _MakeHttpRequest(
+        _authentikServer,
+        _authentikPort,
+        _useHttps,
+        L"POST",
+        url,
+        payload,
+        L"",
+        responseBody);
+
+    if (FAILED(hr))
+    {
+        LOG("ValidateOTP: POST OTP failed: 0x%08x", hr);
+        response.message = L"Failed to validate OTP";
+        return response;
+    }
+
+    LOG("ValidateOTP: OTP response length=%d", (int)responseBody.length());
+    if (responseBody.length() < 500)
+    {
+        LOG("ValidateOTP: OTP response: %S", responseBody.c_str());
     }
     else
     {
-        LOG("ValidateOTP: No OTP challenge detected in first response");
+        LOG("ValidateOTP: OTP response (truncated): %S...", responseBody.substr(0, 500).c_str());
     }
 
-    // Parse response
+    // Parse final response
     response = _ParseOTPResponse(responseBody);
     LOG("ValidateOTP response: success=%d", response.success);
 
