@@ -1,0 +1,15 @@
+Windows Registry Editor Version 5.00
+
+; Authentik Credential Provider - Phase 2 Configuration
+; Update the CertIssuerApiToken value with your actual token
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\AuthentikCredentialProvider]
+"AuthentikServer"="authentik.test.local"
+"AuthentikPort"=dword:000001bb
+"FlowSlug"="windows-otp-auth"
+"UseHttps"=dword:00000001
+"CertIssuerServer"="192.168.1.101"
+"CertIssuerPort"=dword:000020fb
+"CertIssuerApiToken"="YOUR_API_TOKEN_HERE"
+"Domain"="test.local"
+"VSCPin"="12345678"
