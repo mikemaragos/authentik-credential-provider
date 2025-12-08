@@ -18,6 +18,7 @@
 #include "guid.h"
 #include <shlwapi.h>
 #include <wincred.h>
+#include <new>
 
 #pragma comment(lib, "shlwapi.lib")
 
