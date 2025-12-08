@@ -6,8 +6,11 @@
 
 #include <windows.h>
 #include <winhttp.h>
+#include <objbase.h>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "ole32.lib")
 
 // Response structure for OTP validation
 struct AuthentikResponse
