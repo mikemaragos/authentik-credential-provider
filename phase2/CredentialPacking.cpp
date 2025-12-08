@@ -1,25 +1,29 @@
 // CredentialPacking.cpp
-// Implementation of credential serialization - Phase 2 (Smart Card/Certificate)
+// Implementation of KERB_CERTIFICATE_LOGON serialization
+// Phase 2: Smart Card/Certificate authentication
+// December 8, 2025
 
 #include "CredentialPacking.h"
 #include "Logger.h"
-#include <windows.h>
-#include <ntsecapi.h>
-#include <NTSecPKG.h>
-#include <string>
 
 #pragma comment(lib, "Secur32.lib")
 #pragma comment(lib, "Advapi32.lib")
 
-// Helper function to initialize UNICODE_STRING
-static void InitUnicodeString(UNICODE_STRING* pus, PWSTR pwz)
+// Helper: Initialize UNICODE_STRING with pointer adjustment for serialization
+static void InitUnicodeStringRelative(
+    UNICODE_STRING* pus,
+    LPWSTR pwszBuffer,
+    LPCWSTR pwszSource,
+    BYTE* pBaseAddress)
 {
-    if (pwz != nullptr)
+    if (pwszSource && *pwszSource)
     {
-        size_t len = wcslen(pwz);
+        size_t len = wcslen(pwszSource);
+        wcscpy_s(pwszBuffer, len + 1, pwszSource);
+        
         pus->Length = (USHORT)(len * sizeof(WCHAR));
         pus->MaximumLength = (USHORT)((len + 1) * sizeof(WCHAR));
-        pus->Buffer = pwz;
+        pus->Buffer = (PWSTR)((BYTE*)pwszBuffer - pBaseAddress);  // Relative offset
     }
     else
     {
@@ -36,27 +40,27 @@ HRESULT BuildSmartCardCspInfo(
     DWORD* pcbCspInfo)
 {
     LOG("BuildSmartCardCspInfo");
+    LOG("  Reader: %S", vscInfo.readerName.c_str());
+    LOG("  Container: %S", vscInfo.containerName.c_str());
+    LOG("  CSP: %S", vscInfo.cspName.c_str());
+    LOG("  Card: %S", vscInfo.cardName.c_str());
 
     if (!ppCspInfo || !pcbCspInfo)
         return E_INVALIDARG;
 
-    // Calculate sizes (including null terminators)
+    // Calculate string sizes (in bytes, including null terminators)
     DWORD cbCardName = (DWORD)((vscInfo.cardName.length() + 1) * sizeof(WCHAR));
     DWORD cbReaderName = (DWORD)((vscInfo.readerName.length() + 1) * sizeof(WCHAR));
     DWORD cbContainerName = (DWORD)((vscInfo.containerName.length() + 1) * sizeof(WCHAR));
     DWORD cbCspName = (DWORD)((vscInfo.cspName.length() + 1) * sizeof(WCHAR));
 
-    // Calculate total size
-    // Structure without bBuffer + all strings
-    DWORD cbHeader = sizeof(KERB_SMARTCARD_CSP_INFO) - sizeof(TCHAR); // Subtract bBuffer[1]
-    DWORD cbStrings = cbCardName + cbReaderName + cbContainerName + cbCspName;
-    DWORD cbTotal = cbHeader + cbStrings;
+    // Calculate total size: structure header + all strings
+    // Note: bBuffer[1] is already counted in sizeof, so subtract sizeof(WCHAR)
+    DWORD cbHeader = sizeof(KERB_SMARTCARD_CSP_INFO) - sizeof(WCHAR);
+    DWORD cbTotal = cbHeader + cbCardName + cbReaderName + cbContainerName + cbCspName;
 
-    LOG("CSP Info sizes - Header: %d, Strings: %d, Total: %d", cbHeader, cbStrings, cbTotal);
-    LOG("  CardName: %S (%d bytes)", vscInfo.cardName.c_str(), cbCardName);
-    LOG("  ReaderName: %S (%d bytes)", vscInfo.readerName.c_str(), cbReaderName);
-    LOG("  ContainerName: %S (%d bytes)", vscInfo.containerName.c_str(), cbContainerName);
-    LOG("  CspName: %S (%d bytes)", vscInfo.cspName.c_str(), cbCspName);
+    LOG("CSP Info sizes: header=%d, card=%d, reader=%d, container=%d, csp=%d, total=%d",
+        cbHeader, cbCardName, cbReaderName, cbContainerName, cbCspName, cbTotal);
 
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
@@ -71,43 +75,54 @@ HRESULT BuildSmartCardCspInfo(
     // Cast to structure
     KERB_SMARTCARD_CSP_INFO* pCspInfo = (KERB_SMARTCARD_CSP_INFO*)pBuffer;
 
-    // Fill in header
+    // Fill header
     pCspInfo->dwCspInfoLen = cbTotal;
-    pCspInfo->MessageType = 1;  // Required value
+    pCspInfo->MessageType = 1;  // Must be 1
     pCspInfo->ContextInformation = nullptr;
     pCspInfo->flags = 0;
-    pCspInfo->KeySpec = AT_KEYEXCHANGE;  // Required for smart card logon
+    pCspInfo->KeySpec = AT_KEYEXCHANGE;  // 1
 
-    // Calculate offsets (relative to start of bBuffer)
-    ULONG currentOffset = 0;
+    // Calculate string offsets (relative to start of bBuffer)
+    ULONG nOffset = 0;
 
-    // Card name
-    pCspInfo->nCardNameOffset = currentOffset;
-    memcpy(pCspInfo->bBuffer + currentOffset, vscInfo.cardName.c_str(), cbCardName);
-    currentOffset += cbCardName;
+    // Card name at offset 0
+    pCspInfo->nCardNameOffset = nOffset;
+    if (!vscInfo.cardName.empty())
+    {
+        wcscpy_s((LPWSTR)(pCspInfo->bBuffer + nOffset / sizeof(WCHAR)), 
+                 vscInfo.cardName.length() + 1, 
+                 vscInfo.cardName.c_str());
+    }
+    nOffset += cbCardName;
 
     // Reader name
-    pCspInfo->nReaderNameOffset = currentOffset;
-    memcpy(pCspInfo->bBuffer + currentOffset, vscInfo.readerName.c_str(), cbReaderName);
-    currentOffset += cbReaderName;
+    pCspInfo->nReaderNameOffset = nOffset;
+    wcscpy_s((LPWSTR)((BYTE*)pCspInfo->bBuffer + nOffset), 
+             (cbTotal - cbHeader - nOffset) / sizeof(WCHAR),
+             vscInfo.readerName.c_str());
+    nOffset += cbReaderName;
 
     // Container name
-    pCspInfo->nContainerNameOffset = currentOffset;
-    memcpy(pCspInfo->bBuffer + currentOffset, vscInfo.containerName.c_str(), cbContainerName);
-    currentOffset += cbContainerName;
+    pCspInfo->nContainerNameOffset = nOffset;
+    wcscpy_s((LPWSTR)((BYTE*)pCspInfo->bBuffer + nOffset),
+             (cbTotal - cbHeader - nOffset) / sizeof(WCHAR),
+             vscInfo.containerName.c_str());
+    nOffset += cbContainerName;
 
     // CSP name
-    pCspInfo->nCSPNameOffset = currentOffset;
-    memcpy(pCspInfo->bBuffer + currentOffset, vscInfo.cspName.c_str(), cbCspName);
+    pCspInfo->nCSPNameOffset = nOffset;
+    wcscpy_s((LPWSTR)((BYTE*)pCspInfo->bBuffer + nOffset),
+             (cbTotal - cbHeader - nOffset) / sizeof(WCHAR),
+             vscInfo.cspName.c_str());
 
-    LOG("CSP Info offsets - Card: %d, Reader: %d, Container: %d, CSP: %d",
+    LOG("CSP Info offsets: card=%d, reader=%d, container=%d, csp=%d",
         pCspInfo->nCardNameOffset, pCspInfo->nReaderNameOffset,
         pCspInfo->nContainerNameOffset, pCspInfo->nCSPNameOffset);
 
     *ppCspInfo = pBuffer;
     *pcbCspInfo = cbTotal;
 
-    LOG("CSP Info built successfully: %d bytes", cbTotal);
+    LOG("BuildSmartCardCspInfo: success, size=%d bytes", cbTotal);
     return S_OK;
 }
 
@@ -125,16 +140,15 @@ HRESULT PackKerbCertificateLogon(
     if (!ppPackage || !pcbPackage)
         return E_INVALIDARG;
 
-    HRESULT hr = E_FAIL;
+    HRESULT hr;
 
-    // First, build the CSP info
+    // Build CSP info first
     BYTE* pCspInfo = nullptr;
     DWORD cbCspInfo = 0;
-
     hr = BuildSmartCardCspInfo(vscInfo, &pCspInfo, &cbCspInfo);
     if (FAILED(hr))
     {
-        LOG("ERROR: Failed to build CSP info: 0x%08x", hr);
+        LOG("ERROR: BuildSmartCardCspInfo failed: 0x%08x", hr);
         return hr;
     }
 
@@ -143,18 +157,18 @@ HRESULT PackKerbCertificateLogon(
     DWORD cbUsername = (DWORD)((username.length() + 1) * sizeof(WCHAR));
     DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
 
-    // Total size: KERB_CERTIFICATE_LOGON structure + strings + CSP info
+    // Total size: structure + strings + CSP info
     DWORD cbTotal = sizeof(KERB_CERTIFICATE_LOGON) + cbDomain + cbUsername + cbPin + cbCspInfo;
 
-    LOG("Buffer sizes - Total: %d, Domain: %d, User: %d, PIN: %d, CSP: %d",
-        cbTotal, cbDomain, cbUsername, cbPin, cbCspInfo);
+    LOG("Package sizes: struct=%d, domain=%d, user=%d, pin=%d, csp=%d, total=%d",
+        (DWORD)sizeof(KERB_CERTIFICATE_LOGON), cbDomain, cbUsername, cbPin, cbCspInfo, cbTotal);
 
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
     if (!pBuffer)
     {
-        LOG("ERROR: Failed to allocate buffer");
         CoTaskMemFree(pCspInfo);
+        LOG("ERROR: Failed to allocate package buffer");
         return E_OUTOFMEMORY;
     }
 
@@ -165,68 +179,44 @@ HRESULT PackKerbCertificateLogon(
 
     // Set message type
     pLogon->MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbCertificateLogon;
-    LOG("MessageType set to KerbCertificateLogon (%d)", KerbCertificateLogon);
-
-    // String buffer starts after the structure
-    BYTE* pStringBuffer = pBuffer + sizeof(KERB_CERTIFICATE_LOGON);
-
-    // Copy domain
-    if (!domain.empty())
-    {
-        memcpy(pStringBuffer, domain.c_str(), cbDomain);
-        InitUnicodeString(&pLogon->DomainName, (PWSTR)pStringBuffer);
-        pStringBuffer += cbDomain;
-        LOG("Domain: %S (Length: %d)", pLogon->DomainName.Buffer, pLogon->DomainName.Length);
-    }
-    else
-    {
-        InitUnicodeString(&pLogon->DomainName, nullptr);
-    }
-
-    // Copy username
-    if (!username.empty())
-    {
-        memcpy(pStringBuffer, username.c_str(), cbUsername);
-        InitUnicodeString(&pLogon->UserName, (PWSTR)pStringBuffer);
-        pStringBuffer += cbUsername;
-        LOG("Username: %S (Length: %d)", pLogon->UserName.Buffer, pLogon->UserName.Length);
-    }
-    else
-    {
-        InitUnicodeString(&pLogon->UserName, nullptr);
-    }
-
-    // Copy PIN
-    if (!pin.empty())
-    {
-        memcpy(pStringBuffer, pin.c_str(), cbPin);
-        InitUnicodeString(&pLogon->Pin, (PWSTR)pStringBuffer);
-        pStringBuffer += cbPin;
-        LOG("PIN set (Length: %d)", pLogon->Pin.Length);
-    }
-    else
-    {
-        InitUnicodeString(&pLogon->Pin, nullptr);
-    }
-
-    // Set flags
     pLogon->Flags = 0;
 
-    // Copy CSP info
-    pLogon->CspDataLength = cbCspInfo;
-    pLogon->CspData = pStringBuffer;
-    memcpy(pStringBuffer, pCspInfo, cbCspInfo);
+    // String buffer starts after structure
+    BYTE* pStringBuffer = pBuffer + sizeof(KERB_CERTIFICATE_LOGON);
 
-    LOG("CSP data copied at offset %d, length %d", (DWORD)(pStringBuffer - pBuffer), cbCspInfo);
+    // Copy domain name
+    memcpy(pStringBuffer, domain.c_str(), cbDomain);
+    pLogon->DomainName.Length = (USHORT)((domain.length()) * sizeof(WCHAR));
+    pLogon->DomainName.MaximumLength = (USHORT)cbDomain;
+    pLogon->DomainName.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // Relative offset
+    pStringBuffer += cbDomain;
+
+    // Copy username
+    memcpy(pStringBuffer, username.c_str(), cbUsername);
+    pLogon->UserName.Length = (USHORT)((username.length()) * sizeof(WCHAR));
+    pLogon->UserName.MaximumLength = (USHORT)cbUsername;
+    pLogon->UserName.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // Relative offset
+    pStringBuffer += cbUsername;
+
+    // Copy PIN
+    memcpy(pStringBuffer, pin.c_str(), cbPin);
+    pLogon->Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
+    pLogon->Pin.MaximumLength = (USHORT)cbPin;
+    pLogon->Pin.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // Relative offset
+    pStringBuffer += cbPin;
+
+    // Copy CSP info
+    memcpy(pStringBuffer, pCspInfo, cbCspInfo);
+    pLogon->CspDataLength = cbCspInfo;
+    pLogon->CspData = (PUCHAR)(pStringBuffer - pBuffer);  // Relative offset
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
 
-    // Return the buffer
     *ppPackage = pBuffer;
     *pcbPackage = cbTotal;
 
-    LOG("Successfully packed KERB_CERTIFICATE_LOGON - Size: %d bytes", cbTotal);
+    LOG("PackKerbCertificateLogon: success, total size=%d bytes", cbTotal);
     return S_OK;
 }
 
@@ -244,16 +234,15 @@ HRESULT PackKerbCertificateUnlockLogon(
     if (!ppPackage || !pcbPackage)
         return E_INVALIDARG;
 
-    HRESULT hr = E_FAIL;
+    HRESULT hr;
 
-    // First, build the CSP info
+    // Build CSP info first
     BYTE* pCspInfo = nullptr;
     DWORD cbCspInfo = 0;
-
     hr = BuildSmartCardCspInfo(vscInfo, &pCspInfo, &cbCspInfo);
     if (FAILED(hr))
     {
-        LOG("ERROR: Failed to build CSP info: 0x%08x", hr);
+        LOG("ERROR: BuildSmartCardCspInfo failed: 0x%08x", hr);
         return hr;
     }
 
@@ -262,17 +251,18 @@ HRESULT PackKerbCertificateUnlockLogon(
     DWORD cbUsername = (DWORD)((username.length() + 1) * sizeof(WCHAR));
     DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
 
-    // Total size: KERB_CERTIFICATE_UNLOCK_LOGON structure + strings + CSP info
+    // Total size: structure + strings + CSP info
     DWORD cbTotal = sizeof(KERB_CERTIFICATE_UNLOCK_LOGON) + cbDomain + cbUsername + cbPin + cbCspInfo;
 
-    LOG("Unlock buffer size: %d", cbTotal);
+    LOG("Unlock package sizes: struct=%d, total=%d", 
+        (DWORD)sizeof(KERB_CERTIFICATE_UNLOCK_LOGON), cbTotal);
 
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
     if (!pBuffer)
     {
-        LOG("ERROR: Failed to allocate buffer");
         CoTaskMemFree(pCspInfo);
+        LOG("ERROR: Failed to allocate package buffer");
         return E_OUTOFMEMORY;
     }
 
@@ -281,190 +271,49 @@ HRESULT PackKerbCertificateUnlockLogon(
     // Cast to structure
     KERB_CERTIFICATE_UNLOCK_LOGON* pUnlock = (KERB_CERTIFICATE_UNLOCK_LOGON*)pBuffer;
 
-    // Set message type
+    // Set message type for unlock
     pUnlock->Logon.MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbCertificateUnlockLogon;
-    LOG("MessageType set to KerbCertificateUnlockLogon (%d)", KerbCertificateUnlockLogon);
-
-    // String buffer starts after the structure
-    BYTE* pStringBuffer = pBuffer + sizeof(KERB_CERTIFICATE_UNLOCK_LOGON);
-
-    // Copy domain
-    if (!domain.empty())
-    {
-        memcpy(pStringBuffer, domain.c_str(), cbDomain);
-        InitUnicodeString(&pUnlock->Logon.DomainName, (PWSTR)pStringBuffer);
-        pStringBuffer += cbDomain;
-    }
-    else
-    {
-        InitUnicodeString(&pUnlock->Logon.DomainName, nullptr);
-    }
-
-    // Copy username
-    if (!username.empty())
-    {
-        memcpy(pStringBuffer, username.c_str(), cbUsername);
-        InitUnicodeString(&pUnlock->Logon.UserName, (PWSTR)pStringBuffer);
-        pStringBuffer += cbUsername;
-    }
-    else
-    {
-        InitUnicodeString(&pUnlock->Logon.UserName, nullptr);
-    }
-
-    // Copy PIN
-    if (!pin.empty())
-    {
-        memcpy(pStringBuffer, pin.c_str(), cbPin);
-        InitUnicodeString(&pUnlock->Logon.Pin, (PWSTR)pStringBuffer);
-        pStringBuffer += cbPin;
-    }
-    else
-    {
-        InitUnicodeString(&pUnlock->Logon.Pin, nullptr);
-    }
-
-    // Set flags
     pUnlock->Logon.Flags = 0;
 
-    // Copy CSP info
-    pUnlock->Logon.CspDataLength = cbCspInfo;
-    pUnlock->Logon.CspData = pStringBuffer;
-    memcpy(pStringBuffer, pCspInfo, cbCspInfo);
-
-    // Set LogonId to zero (required for unlock)
+    // LogonId = 0 for unlock
     pUnlock->LogonId.LowPart = 0;
     pUnlock->LogonId.HighPart = 0;
+
+    // String buffer starts after structure
+    BYTE* pStringBuffer = pBuffer + sizeof(KERB_CERTIFICATE_UNLOCK_LOGON);
+
+    // Copy domain name
+    memcpy(pStringBuffer, domain.c_str(), cbDomain);
+    pUnlock->Logon.DomainName.Length = (USHORT)((domain.length()) * sizeof(WCHAR));
+    pUnlock->Logon.DomainName.MaximumLength = (USHORT)cbDomain;
+    pUnlock->Logon.DomainName.Buffer = (PWSTR)(pStringBuffer - pBuffer);
+    pStringBuffer += cbDomain;
+
+    // Copy username
+    memcpy(pStringBuffer, username.c_str(), cbUsername);
+    pUnlock->Logon.UserName.Length = (USHORT)((username.length()) * sizeof(WCHAR));
+    pUnlock->Logon.UserName.MaximumLength = (USHORT)cbUsername;
+    pUnlock->Logon.UserName.Buffer = (PWSTR)(pStringBuffer - pBuffer);
+    pStringBuffer += cbUsername;
+
+    // Copy PIN
+    memcpy(pStringBuffer, pin.c_str(), cbPin);
+    pUnlock->Logon.Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
+    pUnlock->Logon.Pin.MaximumLength = (USHORT)cbPin;
+    pUnlock->Logon.Pin.Buffer = (PWSTR)(pStringBuffer - pBuffer);
+    pStringBuffer += cbPin;
+
+    // Copy CSP info
+    memcpy(pStringBuffer, pCspInfo, cbCspInfo);
+    pUnlock->Logon.CspDataLength = cbCspInfo;
+    pUnlock->Logon.CspData = (PUCHAR)(pStringBuffer - pBuffer);
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
 
-    // Return the buffer
     *ppPackage = pBuffer;
     *pcbPackage = cbTotal;
 
-    LOG("Successfully packed KERB_CERTIFICATE_UNLOCK_LOGON - Size: %d bytes", cbTotal);
-    return S_OK;
-}
-
-// ============================================================================
-// Legacy functions for password-based auth (kept for compatibility/fallback)
-// ============================================================================
-
-HRESULT PackKerbInteractiveLogon(
-    const std::wstring& username,
-    const std::wstring& password,
-    const std::wstring& domain,
-    BYTE** ppPackage,
-    DWORD* pcbPackage)
-{
-    LOG("PackKerbInteractiveLogon (legacy): user=%S, domain=%S", username.c_str(), domain.c_str());
-
-    if (!ppPackage || !pcbPackage)
-        return E_INVALIDARG;
-
-    // Calculate buffer sizes
-    DWORD cbUsername = (DWORD)((username.length() + 1) * sizeof(WCHAR));
-    DWORD cbPassword = (DWORD)((password.length() + 1) * sizeof(WCHAR));
-    DWORD cbDomain = (DWORD)((domain.length() + 1) * sizeof(WCHAR));
-
-    DWORD cbTotal = sizeof(KERB_INTERACTIVE_LOGON) + cbUsername + cbPassword + cbDomain;
-
-    // Allocate buffer
-    BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
-    if (!pBuffer)
-        return E_OUTOFMEMORY;
-
-    ZeroMemory(pBuffer, cbTotal);
-
-    KERB_INTERACTIVE_LOGON* pkil = (KERB_INTERACTIVE_LOGON*)pBuffer;
-    pkil->MessageType = KerbInteractiveLogon;
-
-    BYTE* pStringBuffer = pBuffer + sizeof(KERB_INTERACTIVE_LOGON);
-
-    // Username
-    if (!username.empty())
-    {
-        memcpy(pStringBuffer, username.c_str(), cbUsername);
-        InitUnicodeString(&pkil->UserName, (PWSTR)pStringBuffer);
-        pStringBuffer += cbUsername;
-    }
-
-    // Password
-    if (!password.empty())
-    {
-        memcpy(pStringBuffer, password.c_str(), cbPassword);
-        InitUnicodeString(&pkil->Password, (PWSTR)pStringBuffer);
-        pStringBuffer += cbPassword;
-    }
-
-    // Domain
-    if (!domain.empty())
-    {
-        memcpy(pStringBuffer, domain.c_str(), cbDomain);
-        InitUnicodeString(&pkil->LogonDomainName, (PWSTR)pStringBuffer);
-    }
-
-    *ppPackage = pBuffer;
-    *pcbPackage = cbTotal;
-
-    return S_OK;
-}
-
-HRESULT PackKerbInteractiveUnlockLogon(
-    const std::wstring& username,
-    const std::wstring& password,
-    const std::wstring& domain,
-    BYTE** ppPackage,
-    DWORD* pcbPackage)
-{
-    LOG("PackKerbInteractiveUnlockLogon (legacy): user=%S, domain=%S", username.c_str(), domain.c_str());
-
-    if (!ppPackage || !pcbPackage)
-        return E_INVALIDARG;
-
-    DWORD cbUsername = (DWORD)((username.length() + 1) * sizeof(WCHAR));
-    DWORD cbPassword = (DWORD)((password.length() + 1) * sizeof(WCHAR));
-    DWORD cbDomain = (DWORD)((domain.length() + 1) * sizeof(WCHAR));
-
-    DWORD cbTotal = sizeof(KERB_INTERACTIVE_UNLOCK_LOGON) + cbUsername + cbPassword + cbDomain;
-
-    BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
-    if (!pBuffer)
-        return E_OUTOFMEMORY;
-
-    ZeroMemory(pBuffer, cbTotal);
-
-    KERB_INTERACTIVE_UNLOCK_LOGON* pkiul = (KERB_INTERACTIVE_UNLOCK_LOGON*)pBuffer;
-    pkiul->Logon.MessageType = KerbWorkstationUnlockLogon;
-
-    BYTE* pStringBuffer = pBuffer + sizeof(KERB_INTERACTIVE_UNLOCK_LOGON);
-
-    if (!username.empty())
-    {
-        memcpy(pStringBuffer, username.c_str(), cbUsername);
-        InitUnicodeString(&pkiul->Logon.UserName, (PWSTR)pStringBuffer);
-        pStringBuffer += cbUsername;
-    }
-
-    if (!password.empty())
-    {
-        memcpy(pStringBuffer, password.c_str(), cbPassword);
-        InitUnicodeString(&pkiul->Logon.Password, (PWSTR)pStringBuffer);
-        pStringBuffer += cbPassword;
-    }
-
-    if (!domain.empty())
-    {
-        memcpy(pStringBuffer, domain.c_str(), cbDomain);
-        InitUnicodeString(&pkiul->Logon.LogonDomainName, (PWSTR)pStringBuffer);
-    }
-
-    pkiul->LogonId.LowPart = 0;
-    pkiul->LogonId.HighPart = 0;
-
-    *ppPackage = pBuffer;
-    *pcbPackage = cbTotal;
-
+    LOG("PackKerbCertificateUnlockLogon: success, total size=%d bytes", cbTotal);
     return S_OK;
 }
