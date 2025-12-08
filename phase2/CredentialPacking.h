@@ -5,9 +5,13 @@
 #pragma once
 
 #include <windows.h>
+#include <wincrypt.h>
 #include <NTSecAPI.h>
+#include <objbase.h>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "ole32.lib")
 
 // KERB_CERTIFICATE_LOGON message types
 #ifndef KerbCertificateLogon
@@ -16,6 +20,11 @@
 
 #ifndef KerbCertificateUnlockLogon
 #define KerbCertificateUnlockLogon 12
+#endif
+
+// AT_KEYEXCHANGE if not defined
+#ifndef AT_KEYEXCHANGE
+#define AT_KEYEXCHANGE 1
 #endif
 
 // VSC (Virtual Smart Card) information - single definition
