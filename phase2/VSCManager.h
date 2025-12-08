@@ -7,9 +7,12 @@
 #include <windows.h>
 #include <wincrypt.h>
 #include <ncrypt.h>
+#include <objbase.h>
 #include <string>
 #include <vector>
 #include "CredentialPacking.h"  // For VSCInfo struct
+
+#pragma comment(lib, "ole32.lib")
 
 class VSCManager
 {
