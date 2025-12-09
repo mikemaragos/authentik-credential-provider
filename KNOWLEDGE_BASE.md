@@ -1,137 +1,208 @@
-# Windows Credential Provider with OTP Authentication - Complete Knowledge Base
+# Windows Credential Provider with Smart Card Authentication - Complete Knowledge Base
 
 ## Document Purpose
 
-This document captures ALL knowledge, decisions, challenges, solutions, and technical details from the Authentik Windows Credential Provider OTP authentication project. Use this as the single source of truth when starting a new project or resuming this one.
+This document captures ALL knowledge, decisions, challenges, solutions, and technical details from the Authentik Windows Credential Provider project with smart card/PKINIT authentication. Use this as the single source of truth when resuming or expanding this project.
 
 **Last Updated:** December 8, 2025  
-**Project Status:** Phase 2 VALIDATED - Full PKINIT flow working, credential provider integration next  
-**Current Implementation:** CertIssuer→PFX→VSC→PKINIT login verified
+**Project Status:** Phase 2 - Smart Card Integration (PKINIT research complete, implementation pending)  
+**Current Focus:** Fix KERB_SMARTCARD_CSP_INFO structure bugs identified through research
+
+---
+
+## Critical Research Findings (December 8, 2025)
+
+### KERB_SMARTCARD_CSP_INFO Structure Bugs IDENTIFIED
+
+After deep research into Microsoft documentation, IDRIX working samples, and credential provider implementations, we identified **multiple critical bugs** in our structure implementation:
+
+| Issue | Our Implementation | Correct Implementation |
+|-------|-------------------|----------------------|
+| Structure packing | `#pragma pack(push, 8)` | **`#pragma pack(push, 1)`** |
+| MessageType value | Logon type (13) | **Always 1** |
+| String offsets | Byte offsets | **Character count (WCHAR units)** |
+| WOW64 compatibility | Missing | **Union with ULONG64** |
+
+### Correct Structure Definition
+
+```c
+#pragma pack(push, 1)  // CRITICAL: 1-byte packing!
+typedef struct _KERB_SMARTCARD_CSP_INFO {
+    DWORD dwCspInfoLen;       // Total size in BYTES
+    DWORD MessageType;        // MUST be 1 (not logon type!)
+    union {
+        PVOID ContextInformation;
+        ULONG64 SpaceHolderForWow64;  // For 32/64-bit compatibility
+    };
+    DWORD flags;              // Usually 0
+    DWORD KeySpec;            // AT_KEYEXCHANGE (1) or AT_SIGNATURE (2)
+    ULONG nCardNameOffset;    // Offset in CHARACTER COUNT (WCHAR units)
+    ULONG nReaderNameOffset;  // Offset in CHARACTER COUNT
+    ULONG nContainerNameOffset; // Offset in CHARACTER COUNT
+    ULONG nCSPNameOffset;     // Offset in CHARACTER COUNT
+    TCHAR bBuffer;            // Start of string buffer
+} KERB_SMARTCARD_CSP_INFO;
+#pragma pack(pop)
+```
+
+### Credential Provider Buffer Handling
+
+**CRITICAL**: In credential providers, `UNICODE_STRING.Buffer` is a **BYTE OFFSET**, not a pointer!
+
+From Microsoft's helpers.cpp:
+> "WinLogon and LSA consume 'packed' KERB_INTERACTIVE_UNLOCK_LOGONs. In these, the PWSTR members of each UNICODE_STRING are not actually pointers but byte offsets into the overall buffer"
+
+### Working Reference Implementations
+
+- **IDRIX LsaSmartCardLogon.cpp**: http://www.idrix.fr/Root/Samples/LsaSmartCardLogon.cpp (KERB_CERTIFICATE_LOGON)
+- **IDRIX LsaSmartCardLogon2.cpp**: http://www.idrix.fr/Root/Samples/LsaSmartCardLogon2.cpp (KERB_SMART_CARD_LOGON)
+- **Microsoft helpers.cpp**: https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/CredentialProvider/cpp/helpers.cpp
 
 ---
 
 ## Project Phases
 
-### Phase 1: Manual VSC + PKINIT ✅ COMPLETE
-- Virtual Smart Card creation and certificate enrollment
-- PKINIT authentication to domain controller
-- KB5014754 strong certificate mapping (X509:<SKI>)
+### Phase 1: Basic VSC + PKINIT ✅ WORKING
+- Manual VSC creation with tpmvscmgr.exe
+- Manual certificate import via certutil
+- Manual PKINIT login via Windows Smart Card CP
+- **VALIDATED**: DC + Workstation correctly configured
 
-### Phase 2: Automated Certificate Flow ✅ VALIDATED
-- CertIssuer service ✅ WORKING
-- PFX import to VSC ✅ WORKING  
-- PKINIT login ✅ WORKING
-- Credential Provider integration (next step)
+### Phase 2: Automated Certificate Flow ✅ VALIDATED (manual), 🔧 IN PROGRESS (CP integration)
+- CertIssuer service issues certificates via API
+- PFX import to VSC works manually
+- **STATUS**: CP integration failing with STATUS_INVALID_PARAMETER
+- **ROOT CAUSE**: KERB_SMARTCARD_CSP_INFO structure bugs (identified via research)
 
----
-
-## Critical Discovery: KB5014754 Strong Certificate Mapping
-
-**Root Cause:** Microsoft KB5014754 (May 2022) enforces strong certificate mapping as of February 2025. UPN-only mapping is now "weak" and fails authentication.
-
-### Mapping Types
-
-| Type | Strength | Status |
-|------|----------|--------|
-| SID extension in cert | Strong | Not available (Supply in Request) |
-| X509:<SKI> | Strong | ✅ Using this |
-| X509:<I><SR> (Issuer+Serial) | Strong | Alternative |
-| UPN in SAN | Weak | ❌ Fails since Feb 2025 |
-
----
-
-## CertIssuer Service ✅ WORKING
-
-### Service Details
-- **Location:** DC (WIN-6DP39D0OLI8.test.local)
-- **Port:** 8443 (HTTP)
-- **API Token:** (stored in Claude memory)
-- **Install Path:** `C:\CertIssuer`
-- **Service Name:** CertIssuer (NSSM-managed)
-
-### API: Issue Certificate
-```
-POST http://192.168.1.101:8443/api/v1/certificate/issue
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{"username": "shop", "domain": "test.local"}
-```
-
-### Response includes:
-- `certificate` - Base64 DER
-- `pfx` - Base64 PFX with private key
-- `pfx_password` - Random GUID password
-- `ski` - Subject Key Identifier
-- `ad_mapping_updated` - Confirms altSecurityIdentities set
-
----
-
-## Validated Test Flow (December 8, 2025)
-
-```powershell
-# 1. Get certificate from CertIssuer
-$headers = @{Authorization = "Bearer <token>"}
-$body = @{username="shop"; domain="test.local"} | ConvertTo-Json
-$result = Invoke-RestMethod "http://192.168.1.101:8443/api/v1/certificate/issue" -Method POST -Body $body -ContentType "application/json" -Headers $headers
-
-# 2. Save PFX
-$pfxBytes = [Convert]::FromBase64String($result.pfx)
-[IO.File]::WriteAllBytes("C:\temp\shop.pfx", $pfxBytes)
-
-# 3. Import to VSC (use $result.pfx_password when prompted)
-certutil -csp "Microsoft Base Smart Card Crypto Provider" -importpfx "C:\temp\shop.pfx"
-
-# 4. Lock screen (Win+L), select smart card, enter PIN: 12345678
-# Result: SUCCESSFUL LOGIN as shop@test.local
-```
+### Phase 3: Full Authentik Integration (PENDING)
+- Authentik OTP validation triggers certificate issuance
+- Complete passwordless flow
 
 ---
 
 ## Environment Configuration
 
-### Domain Controller (WIN-6DP39D0OLI8.test.local)
-| Setting | Value |
-|---------|-------|
-| IP | 192.168.1.101 |
-| Domain | TEST / test.local |
-| StrongCertificateBindingEnforcement | 0 |
-| CertIssuer | Port 8443, running |
+### Domain Controller (DC)
+- **Hostname**: dc.test.local
+- **Services**: AD DS, AD CS (CertIssuer), DNS
+- **CertIssuer API**: Port 8443, Token: dkWSmvx1aE6EiPGU9GJ2nNAMN5YczqeC
+- **Registry Setting**: `StrongCertificateBindingEnforcement = 0`
 
 ### Workstation
-| Setting | Value |
-|---------|-------|
-| Smart Card CP | Enabled |
-| VSC PIN | 12345678 |
+- **Domain**: TEST.LOCAL
+- **Smart Card CP Enabled**: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8FD7E19C-3BF7-489B-A72C-846AB3678C96}
+- **VSC PIN**: 12345678
+- **Reader Name**: "Microsoft Virtual Smart Card 0"
+- **CSP Name**: "Microsoft Base Smart Card Crypto Provider"
 
-### Test User
-| Attribute | Value |
-|-----------|-------|
-| Username | shop |
-| UPN | shop@test.local |
-| altSecurityIdentities | X509:<SKI>... (auto-set by CertIssuer) |
+### Certificate Requirements
+- **EKU**: Smart Card Logon (1.3.6.1.4.1.311.20.2.2)
+- **SAN**: UPN (user@domain format)
+- **Key Usage**: Digital Signature
+- **KeySpec**: AT_KEYEXCHANGE (1)
+
+### Certificate Mapping (KB5014754)
+- UPN mapping is weak and fails with enforcement
+- Use **X509:<SKI>** mapping instead
+- Get SKI: `$cert.Extensions|Where{$_.Oid.Value -eq "2.5.29.14"}|%{$_.Format(0)}`
+
+---
+
+## Authentication Structures
+
+### KERB_CERTIFICATE_LOGON (MessageType = 13)
+- Includes DomainName and UserName (optional but helpful)
+- Best for domain logon scenarios
+- Contains PIN and CspData
+
+### KERB_SMART_CARD_LOGON (MessageType = 6)
+- Simpler, no username/domain fields
+- User identity from certificate UPN
+- Contains PIN and CspData only
+
+### Buffer Layout for Credential Provider
+```
+[KERB_CERTIFICATE_LOGON structure]
+[Domain string (null-terminated WCHAR)]
+[Username string (null-terminated WCHAR)]
+[PIN string (null-terminated WCHAR)]
+[KERB_SMARTCARD_CSP_INFO + string data]
+```
+
+---
+
+## Files Structure
+
+### Root Directory (Phase 1 - Basic OTP)
+- AuthentikCredentialProvider.cpp/h
+- AuthentikCredential.cpp/h
+- CredentialPacking.cpp/h
+- AuthentikAPI.cpp/h
+- Dll.cpp, FieldDescriptors.h, guid.h, Logger.h
+
+### Phase 2 Directory (Smart Card)
+- AuthentikCredentialProvider.cpp/h - Uses Kerberos package
+- AuthentikCredential.cpp/h - Smart card flow
+- CredentialPacking.cpp/h - **NEEDS FIX** per research findings
+- SmartCardHelper.cpp/h - VSC enumeration and cert discovery
 
 ---
 
 ## Next Steps
 
-1. **Update Phase 2 Credential Provider** - Call CertIssuer after OTP validation
-2. **Programmatic VSC Import** - Use NCrypt APIs instead of certutil
-3. **Build KERB_CERTIFICATE_LOGON** - Submit to LSA for PKINIT
-4. **End-to-End Testing** - Full automated OTP→Login flow
+1. **Fix CredentialPacking.cpp** with correct structure:
+   - 1-byte packing for KERB_SMARTCARD_CSP_INFO
+   - MessageType = 1 for CSP INFO
+   - Character count for string offsets
+   - Byte offsets for UNICODE_STRING.Buffer
+
+2. **Test with corrected structures**
+   - Build and deploy updated DLL
+   - Verify DC logs show Pre-Auth Type 16 (PKINIT)
+   - Confirm successful login
+
+3. **Integrate with Authentik**
+   - Add OTP validation step before certificate issuance
+   - Complete passwordless flow
 
 ---
 
-## Version History
+## Troubleshooting
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | Nov 22, 2025 | Initial Phase 1 |
-| 2.0 | Dec 1, 2025 | KB5014754 discovery |
-| 2.1 | Dec 8, 2025 | CertIssuer service working |
-| 2.3 | Dec 8, 2025 | **Full PKINIT flow validated** |
+### STATUS_INVALID_PARAMETER (0xC000000D)
+- Check structure packing
+- Verify MessageType values
+- Confirm offset calculations
+- Review buffer layout
+
+### DC Shows Pre-Auth Type 2 (Password) Instead of 16 (PKINIT)
+- Kerberos SSP not receiving valid certificate data
+- Check KERB_SMARTCARD_CSP_INFO structure
+- Verify CSP/reader/container names match VSC
+
+### View Smart Card Info
+```powershell
+certutil -scinfo
+```
+
+### View VSC Containers
+```powershell
+certutil -csp "Microsoft Base Smart Card Crypto Provider" -key
+```
 
 ---
 
-**Document Version:** 2.3  
-**Last Updated:** December 8, 2025
+## References
+
+1. Microsoft KERB_CERTIFICATE_LOGON: https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/ns-ntsecapi-kerb_certificate_logon
+2. Microsoft KERB_SMARTCARD_CSP_INFO: https://learn.microsoft.com/en-us/windows/win32/secauthn/kerb-smartcard-csp-info
+3. IDRIX Samples: http://www.idrix.fr/Root/Samples/
+4. Microsoft CP Sample: https://github.com/microsoft/Windows-classic-samples/tree/main/Samples/CredentialProvider
+5. Smart Card Architecture: https://learn.microsoft.com/en-us/windows/security/identity-protection/smart-cards/smart-card-architecture
+
+---
+
+**Document Version:** 2.0  
+**Last Updated:** December 8, 2025  
+
+This knowledge base ensures no knowledge is lost when resuming this project.
