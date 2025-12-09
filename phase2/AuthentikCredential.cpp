@@ -16,6 +16,7 @@
 #include "CredentialPacking.h"
 #include "Logger.h"
 #include "guid.h"
+#include "resource.h"
 #include <shlwapi.h>
 #include <wincred.h>
 #include <new>
@@ -247,10 +248,29 @@ HRESULT CAuthentikCredential::GetStringValue(DWORD dwFieldID, LPWSTR* ppwsz)
 
 HRESULT CAuthentikCredential::GetBitmapValue(DWORD dwFieldID, HBITMAP* phbmp)
 {
-    if (dwFieldID == FID_LOGO)
+    if (dwFieldID == FID_LOGO && phbmp)
     {
-        *phbmp = nullptr;  // Use default
-        return S_OK;
+        // Load the Authentik tile image from resources
+        extern HINSTANCE g_hinst;
+        HBITMAP hbmp = (HBITMAP)LoadImageW(
+            g_hinst,
+            MAKEINTRESOURCEW(IDB_TILE_IMAGE),
+            IMAGE_BITMAP,
+            0, 0,
+            LR_DEFAULTCOLOR);
+        
+        if (hbmp)
+        {
+            *phbmp = hbmp;
+            LOG("GetBitmapValue: Loaded tile bitmap");
+            return S_OK;
+        }
+        else
+        {
+            LOG("GetBitmapValue: Failed to load bitmap, error=%d", GetLastError());
+            *phbmp = nullptr;
+            return S_OK;  // Return OK but with null - Windows will use default
+        }
     }
     return E_INVALIDARG;
 }
