@@ -181,7 +181,7 @@ HRESULT PackKerbCertificateLogon(
     // Cast to structure
     MY_KERB_CERTIFICATE_LOGON* pLogon = (MY_KERB_CERTIFICATE_LOGON*)pBuffer;
 
-    // Set message type
+    // Set message type - MUST be 13 for KerbCertificateLogon
     pLogon->MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbCertificateLogon;
     pLogon->Flags = 0;
 
@@ -189,6 +189,7 @@ HRESULT PackKerbCertificateLogon(
 
     // String buffer starts after structure
     BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_CERTIFICATE_LOGON);
+    ULONG currentOffset = sizeof(MY_KERB_CERTIFICATE_LOGON);
 
     // Convert domain to uppercase for Kerberos realm
     std::wstring upperDomain = domain;
@@ -197,31 +198,38 @@ HRESULT PackKerbCertificateLogon(
     }
     LOG("Domain converted to uppercase: %S", upperDomain.c_str());
 
-    // Copy domain name
+    // Copy domain name - Buffer is OFFSET from start of structure
     memcpy(pStringBuffer, upperDomain.c_str(), cbDomain);
     pLogon->DomainName.Length = (USHORT)((upperDomain.length()) * sizeof(WCHAR));
     pLogon->DomainName.MaximumLength = (USHORT)cbDomain;
-    pLogon->DomainName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
+    pLogon->DomainName.Buffer = (PWSTR)(ULONG_PTR)currentOffset;  // Offset, not pointer
+    LOG("DomainName: offset=%d, length=%d", currentOffset, pLogon->DomainName.Length);
     pStringBuffer += cbDomain;
+    currentOffset += cbDomain;
 
-    // Copy username
+    // Copy username - Buffer is OFFSET from start of structure
     memcpy(pStringBuffer, username.c_str(), cbUsername);
     pLogon->UserName.Length = (USHORT)((username.length()) * sizeof(WCHAR));
     pLogon->UserName.MaximumLength = (USHORT)cbUsername;
-    pLogon->UserName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
+    pLogon->UserName.Buffer = (PWSTR)(ULONG_PTR)currentOffset;  // Offset, not pointer
+    LOG("UserName: offset=%d, length=%d", currentOffset, pLogon->UserName.Length);
     pStringBuffer += cbUsername;
+    currentOffset += cbUsername;
 
-    // Copy PIN
+    // Copy PIN - Buffer is OFFSET from start of structure
     memcpy(pStringBuffer, pin.c_str(), cbPin);
     pLogon->Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
     pLogon->Pin.MaximumLength = (USHORT)cbPin;
-    pLogon->Pin.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
+    pLogon->Pin.Buffer = (PWSTR)(ULONG_PTR)currentOffset;  // Offset, not pointer
+    LOG("Pin: offset=%d, length=%d", currentOffset, pLogon->Pin.Length);
     pStringBuffer += cbPin;
+    currentOffset += cbPin;
 
-    // Copy CSP info
+    // Copy CSP info - CspData is OFFSET from start of structure
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
     pLogon->CspDataLength = cbCspInfo;
-    pLogon->CspData = pStringBuffer;  // Actual pointer
+    pLogon->CspData = (PUCHAR)(ULONG_PTR)currentOffset;  // Offset, not pointer
+    LOG("CspData: offset=%d, length=%d", currentOffset, cbCspInfo);
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
@@ -294,6 +302,7 @@ HRESULT PackKerbCertificateUnlockLogon(
 
     // String buffer starts after structure
     BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_CERTIFICATE_UNLOCK_LOGON);
+    ULONG currentOffset = sizeof(MY_KERB_CERTIFICATE_UNLOCK_LOGON);
 
     // Convert domain to uppercase for Kerberos realm
     std::wstring upperDomain = domain;
@@ -301,31 +310,34 @@ HRESULT PackKerbCertificateUnlockLogon(
         c = towupper(c);
     }
 
-    // Copy domain name
+    // Copy domain name - Buffer is OFFSET from start of structure
     memcpy(pStringBuffer, upperDomain.c_str(), cbDomain);
     pUnlock->Logon.DomainName.Length = (USHORT)((upperDomain.length()) * sizeof(WCHAR));
     pUnlock->Logon.DomainName.MaximumLength = (USHORT)cbDomain;
-    pUnlock->Logon.DomainName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
+    pUnlock->Logon.DomainName.Buffer = (PWSTR)(ULONG_PTR)currentOffset;
     pStringBuffer += cbDomain;
+    currentOffset += cbDomain;
 
-    // Copy username
+    // Copy username - Buffer is OFFSET from start of structure
     memcpy(pStringBuffer, username.c_str(), cbUsername);
     pUnlock->Logon.UserName.Length = (USHORT)((username.length()) * sizeof(WCHAR));
     pUnlock->Logon.UserName.MaximumLength = (USHORT)cbUsername;
-    pUnlock->Logon.UserName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
+    pUnlock->Logon.UserName.Buffer = (PWSTR)(ULONG_PTR)currentOffset;
     pStringBuffer += cbUsername;
+    currentOffset += cbUsername;
 
-    // Copy PIN
+    // Copy PIN - Buffer is OFFSET from start of structure
     memcpy(pStringBuffer, pin.c_str(), cbPin);
     pUnlock->Logon.Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
     pUnlock->Logon.Pin.MaximumLength = (USHORT)cbPin;
-    pUnlock->Logon.Pin.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
+    pUnlock->Logon.Pin.Buffer = (PWSTR)(ULONG_PTR)currentOffset;
     pStringBuffer += cbPin;
+    currentOffset += cbPin;
 
-    // Copy CSP info
+    // Copy CSP info - CspData is OFFSET from start of structure
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
     pUnlock->Logon.CspDataLength = cbCspInfo;
-    pUnlock->Logon.CspData = pStringBuffer;  // Actual pointer
+    pUnlock->Logon.CspData = (PUCHAR)(ULONG_PTR)currentOffset;
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
