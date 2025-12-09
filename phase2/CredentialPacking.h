@@ -13,13 +13,17 @@
 
 #pragma comment(lib, "ole32.lib")
 
-// KERB_CERTIFICATE_LOGON message types
+// KERB_CERTIFICATE_LOGON message types (from KERB_LOGON_SUBMIT_TYPE enum)
+// KerbInteractiveLogon = 2
+// KerbSmartCardLogon = 6
+// KerbCertificateLogon = 13
+// KerbCertificateUnlockLogon = 14
 #ifndef KerbCertificateLogon
-#define KerbCertificateLogon 11
+#define KerbCertificateLogon 13
 #endif
 
 #ifndef KerbCertificateUnlockLogon
-#define KerbCertificateUnlockLogon 12
+#define KerbCertificateUnlockLogon 14
 #endif
 
 // AT_KEYEXCHANGE if not defined
