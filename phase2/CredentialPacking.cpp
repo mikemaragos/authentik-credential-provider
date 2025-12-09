@@ -7,6 +7,7 @@
 #include "Logger.h"
 #include <objbase.h>
 #include <strsafe.h>
+#include <wctype.h>
 
 #pragma comment(lib, "Secur32.lib")
 #pragma comment(lib, "Advapi32.lib")
@@ -184,34 +185,43 @@ HRESULT PackKerbCertificateLogon(
     pLogon->MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbCertificateLogon;
     pLogon->Flags = 0;
 
+    LOG("MessageType set to KerbCertificateLogon (%d)", KerbCertificateLogon);
+
     // String buffer starts after structure
     BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_CERTIFICATE_LOGON);
 
+    // Convert domain to uppercase for Kerberos realm
+    std::wstring upperDomain = domain;
+    for (auto& c : upperDomain) {
+        c = towupper(c);
+    }
+    LOG("Domain converted to uppercase: %S", upperDomain.c_str());
+
     // Copy domain name
-    memcpy(pStringBuffer, domain.c_str(), cbDomain);
-    pLogon->DomainName.Length = (USHORT)((domain.length()) * sizeof(WCHAR));
+    memcpy(pStringBuffer, upperDomain.c_str(), cbDomain);
+    pLogon->DomainName.Length = (USHORT)((upperDomain.length()) * sizeof(WCHAR));
     pLogon->DomainName.MaximumLength = (USHORT)cbDomain;
-    pLogon->DomainName.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // Relative offset
+    pLogon->DomainName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
     pStringBuffer += cbDomain;
 
     // Copy username
     memcpy(pStringBuffer, username.c_str(), cbUsername);
     pLogon->UserName.Length = (USHORT)((username.length()) * sizeof(WCHAR));
     pLogon->UserName.MaximumLength = (USHORT)cbUsername;
-    pLogon->UserName.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // Relative offset
+    pLogon->UserName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
     pStringBuffer += cbUsername;
 
     // Copy PIN
     memcpy(pStringBuffer, pin.c_str(), cbPin);
     pLogon->Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
     pLogon->Pin.MaximumLength = (USHORT)cbPin;
-    pLogon->Pin.Buffer = (PWSTR)(pStringBuffer - pBuffer);  // Relative offset
+    pLogon->Pin.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
     pStringBuffer += cbPin;
 
     // Copy CSP info
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
     pLogon->CspDataLength = cbCspInfo;
-    pLogon->CspData = (PUCHAR)(pStringBuffer - pBuffer);  // Relative offset
+    pLogon->CspData = pStringBuffer;  // Actual pointer
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
@@ -285,31 +295,37 @@ HRESULT PackKerbCertificateUnlockLogon(
     // String buffer starts after structure
     BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_CERTIFICATE_UNLOCK_LOGON);
 
+    // Convert domain to uppercase for Kerberos realm
+    std::wstring upperDomain = domain;
+    for (auto& c : upperDomain) {
+        c = towupper(c);
+    }
+
     // Copy domain name
-    memcpy(pStringBuffer, domain.c_str(), cbDomain);
-    pUnlock->Logon.DomainName.Length = (USHORT)((domain.length()) * sizeof(WCHAR));
+    memcpy(pStringBuffer, upperDomain.c_str(), cbDomain);
+    pUnlock->Logon.DomainName.Length = (USHORT)((upperDomain.length()) * sizeof(WCHAR));
     pUnlock->Logon.DomainName.MaximumLength = (USHORT)cbDomain;
-    pUnlock->Logon.DomainName.Buffer = (PWSTR)(pStringBuffer - pBuffer);
+    pUnlock->Logon.DomainName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
     pStringBuffer += cbDomain;
 
     // Copy username
     memcpy(pStringBuffer, username.c_str(), cbUsername);
     pUnlock->Logon.UserName.Length = (USHORT)((username.length()) * sizeof(WCHAR));
     pUnlock->Logon.UserName.MaximumLength = (USHORT)cbUsername;
-    pUnlock->Logon.UserName.Buffer = (PWSTR)(pStringBuffer - pBuffer);
+    pUnlock->Logon.UserName.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
     pStringBuffer += cbUsername;
 
     // Copy PIN
     memcpy(pStringBuffer, pin.c_str(), cbPin);
     pUnlock->Logon.Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
     pUnlock->Logon.Pin.MaximumLength = (USHORT)cbPin;
-    pUnlock->Logon.Pin.Buffer = (PWSTR)(pStringBuffer - pBuffer);
+    pUnlock->Logon.Pin.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
     pStringBuffer += cbPin;
 
     // Copy CSP info
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
     pUnlock->Logon.CspDataLength = cbCspInfo;
-    pUnlock->Logon.CspData = (PUCHAR)(pStringBuffer - pBuffer);
+    pUnlock->Logon.CspData = pStringBuffer;  // Actual pointer
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
