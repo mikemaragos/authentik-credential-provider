@@ -8,6 +8,7 @@
 #include <objbase.h>
 #include <strsafe.h>
 #include <wctype.h>
+#include <stddef.h>  // for offsetof
 
 #pragma comment(lib, "Secur32.lib")
 #pragma comment(lib, "Advapi32.lib")
@@ -384,6 +385,13 @@ HRESULT PackKerbSmartCardLogon(
     LOG("SmartCard package sizes: struct=%d, pin=%d, csp=%d, total=%d",
         (DWORD)sizeof(MY_KERB_SMARTCARD_LOGON), cbPin, cbCspInfo, cbTotal);
 
+    // Log structure layout for debugging
+    LOG("MY_KERB_SMARTCARD_LOGON layout:");
+    LOG("  offsetof(MessageType)=%d", (int)offsetof(MY_KERB_SMARTCARD_LOGON, MessageType));
+    LOG("  offsetof(Pin)=%d", (int)offsetof(MY_KERB_SMARTCARD_LOGON, Pin));
+    LOG("  offsetof(CspDataLength)=%d", (int)offsetof(MY_KERB_SMARTCARD_LOGON, CspDataLength));
+    LOG("  offsetof(CspData)=%d", (int)offsetof(MY_KERB_SMARTCARD_LOGON, CspData));
+
     // Allocate buffer
     BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
     if (!pBuffer)
@@ -405,22 +413,20 @@ HRESULT PackKerbSmartCardLogon(
 
     // String buffer starts after structure
     BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_SMARTCARD_LOGON);
-    ULONG currentOffset = sizeof(MY_KERB_SMARTCARD_LOGON);
 
-    // Copy PIN - Buffer is OFFSET from start of structure
+    // Copy PIN - use ACTUAL POINTER (LSA will handle relocation)
     memcpy(pStringBuffer, pin.c_str(), cbPin);
     pLogon->Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
     pLogon->Pin.MaximumLength = (USHORT)cbPin;
-    pLogon->Pin.Buffer = (PWSTR)(ULONG_PTR)currentOffset;  // Offset, not pointer
-    LOG("Pin: offset=%d, length=%d", currentOffset, pLogon->Pin.Length);
+    pLogon->Pin.Buffer = (PWSTR)pStringBuffer;  // Actual pointer, not offset
+    LOG("Pin: ptr=%p, length=%d, maxlen=%d", pStringBuffer, pLogon->Pin.Length, pLogon->Pin.MaximumLength);
     pStringBuffer += cbPin;
-    currentOffset += cbPin;
 
-    // Copy CSP info - CspData is OFFSET from start of structure
+    // Copy CSP info - use ACTUAL POINTER
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
     pLogon->CspDataLength = cbCspInfo;
-    pLogon->CspData = (PUCHAR)(ULONG_PTR)currentOffset;  // Offset, not pointer
-    LOG("CspData: offset=%d, length=%d", currentOffset, cbCspInfo);
+    pLogon->CspData = pStringBuffer;  // Actual pointer, not offset
+    LOG("CspData: ptr=%p, length=%d", pStringBuffer, cbCspInfo);
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
@@ -490,20 +496,18 @@ HRESULT PackKerbSmartCardUnlockLogon(
 
     // String buffer starts after structure
     BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_SMARTCARD_UNLOCK_LOGON);
-    ULONG currentOffset = sizeof(MY_KERB_SMARTCARD_UNLOCK_LOGON);
 
-    // Copy PIN - Buffer is OFFSET from start of structure
+    // Copy PIN - use ACTUAL POINTER
     memcpy(pStringBuffer, pin.c_str(), cbPin);
     pUnlock->Logon.Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
     pUnlock->Logon.Pin.MaximumLength = (USHORT)cbPin;
-    pUnlock->Logon.Pin.Buffer = (PWSTR)(ULONG_PTR)currentOffset;
+    pUnlock->Logon.Pin.Buffer = (PWSTR)pStringBuffer;  // Actual pointer
     pStringBuffer += cbPin;
-    currentOffset += cbPin;
 
-    // Copy CSP info - CspData is OFFSET from start of structure
+    // Copy CSP info - use ACTUAL POINTER
     memcpy(pStringBuffer, pCspInfo, cbCspInfo);
     pUnlock->Logon.CspDataLength = cbCspInfo;
-    pUnlock->Logon.CspData = (PUCHAR)(ULONG_PTR)currentOffset;
+    pUnlock->Logon.CspData = pStringBuffer;  // Actual pointer
 
     // Free temporary CSP info buffer
     CoTaskMemFree(pCspInfo);
