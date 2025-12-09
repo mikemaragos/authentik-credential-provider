@@ -15,10 +15,20 @@
 
 // KERB_CERTIFICATE_LOGON message types (from KERB_LOGON_SUBMIT_TYPE enum)
 // KerbInteractiveLogon = 2
-// KerbSmartCardLogon = 6
-// KerbCertificateLogon = 13
+// KerbSmartCardLogon = 6          <-- USE THIS for smart card with PIN + CSP
+// KerbSmartCardUnlockLogon = 8    <-- USE THIS for smart card unlock
+// KerbCertificateLogon = 13       <-- For certificate without smart card (different scenario)
 // KerbCertificateS4ULogon = 14
 // KerbCertificateUnlockLogon = 15
+
+#ifndef KerbSmartCardLogon
+#define KerbSmartCardLogon 6
+#endif
+
+#ifndef KerbSmartCardUnlockLogon  
+#define KerbSmartCardUnlockLogon 8
+#endif
+
 #ifndef KerbCertificateLogon
 #define KerbCertificateLogon 13
 #endif
@@ -77,7 +87,23 @@ typedef struct _MY_KERB_CERTIFICATE_UNLOCK_LOGON {
     LUID LogonId;
 } MY_KERB_CERTIFICATE_UNLOCK_LOGON, *PMY_KERB_CERTIFICATE_UNLOCK_LOGON;
 
-// Pack credentials for smart card certificate logon
+// KERB_SMARTCARD_LOGON structure - SIMPLER structure for smart card auth
+// User identity comes from certificate UPN in SAN, NOT from username field!
+typedef struct _MY_KERB_SMARTCARD_LOGON {
+    KERB_LOGON_SUBMIT_TYPE MessageType;  // Must be KerbSmartCardLogon (6)
+    UNICODE_STRING Pin;                   // Smart card PIN
+    ULONG CspDataLength;                  // Length of CSP data
+    PUCHAR CspData;                       // Pointer to CSP info
+} MY_KERB_SMARTCARD_LOGON, *PMY_KERB_SMARTCARD_LOGON;
+
+// KERB_SMARTCARD_UNLOCK_LOGON structure - for workstation unlock
+typedef struct _MY_KERB_SMARTCARD_UNLOCK_LOGON {
+    MY_KERB_SMARTCARD_LOGON Logon;
+    LUID LogonId;
+} MY_KERB_SMARTCARD_UNLOCK_LOGON, *PMY_KERB_SMARTCARD_UNLOCK_LOGON;
+
+// Pack credentials for smart card certificate logon (KERB_CERTIFICATE_LOGON - MessageType 13)
+// Note: This might not work for VSC - use PackKerbSmartCardLogon instead
 HRESULT PackKerbCertificateLogon(
     const std::wstring& username,
     const std::wstring& domain,
@@ -90,6 +116,22 @@ HRESULT PackKerbCertificateLogon(
 HRESULT PackKerbCertificateUnlockLogon(
     const std::wstring& username,
     const std::wstring& domain,
+    const std::wstring& pin,
+    const VSCInfo& vscInfo,
+    BYTE** ppPackage,
+    DWORD* pcbPackage);
+
+// Pack credentials for smart card logon (KERB_SMARTCARD_LOGON - MessageType 6)
+// This is the PREFERRED method for smart card authentication!
+// User identity comes from certificate UPN, not from username parameter
+HRESULT PackKerbSmartCardLogon(
+    const std::wstring& pin,
+    const VSCInfo& vscInfo,
+    BYTE** ppPackage,
+    DWORD* pcbPackage);
+
+// Pack credentials for smart card unlock (KERB_SMARTCARD_UNLOCK_LOGON - MessageType 8)
+HRESULT PackKerbSmartCardUnlockLogon(
     const std::wstring& pin,
     const VSCInfo& vscInfo,
     BYTE** ppPackage,
