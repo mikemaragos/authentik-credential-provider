@@ -1,88 +1,106 @@
-# Quick Start Guide - Authentik Passwordless Credential Provider
+# Quick Start Guide
 
-## 5-Minute Setup (Development/Testing)
+## Prerequisites
 
-### Step 1: Build
+### Domain Controller
+- Windows Server 2019+ with AD CS role
+- CertIssuer service installed and running
+- `StrongCertificateBindingEnforcement = 0` in registry
 
-```cmd
-:: Open VS Developer Command Prompt, navigate to project directory
-msbuild AuthentikPasswordlessCP.vcxproj /p:Configuration=Release /p:Platform=x64
+### Workstation  
+- Windows 10/11 Pro, domain-joined
+- TPM 2.0 enabled
+- Virtual Smart Card created
+
+### Development
+- Visual Studio 2022
+- Windows SDK
+
+---
+
+## Build
+
+1. **Clone repository:**
+   ```powershell
+   git clone https://github.com/mikemaragos/authentik-credential-provider.git
+   cd authentik-credential-provider
+   ```
+
+2. **Open in Visual Studio:**
+   ```
+   phase2/AuthentikCredentialProvider.sln
+   ```
+
+3. **Build:**
+   - Configuration: `Release`
+   - Platform: `x64`
+   - Build → Build Solution (Ctrl+Shift+B)
+
+---
+
+## Deploy
+
+### 1. Copy DLL (as Administrator)
+```powershell
+copy phase2\x64\Release\AuthentikCredentialProvider.dll C:\Windows\System32\
 ```
 
-### Step 2: Install
-
-```cmd
-:: Run as Administrator
-copy x64\Release\AuthentikPasswordlessCP.dll C:\Windows\System32\
-regsvr32 C:\Windows\System32\AuthentikPasswordlessCP.dll
+### 2. Register DLL
+```powershell
+regsvr32 C:\Windows\System32\AuthentikCredentialProvider.dll
 ```
 
-### Step 3: Configure
+### 3. Configure Registry
+```powershell
+# Import configuration
+reg import phase2\phase2-config.reg
 
-Edit registry or run this (adjust values for your environment):
-
-```cmd
-:: Run as Administrator
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v ServerUrl /t REG_SZ /d "authentik.test.local" /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v ServerPort /t REG_DWORD /d 443 /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v FlowSlug /t REG_SZ /d "windows-passwordless" /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v UseHttps /t REG_DWORD /d 1 /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v Domain /t REG_SZ /d "TEST" /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v DomainFQDN /t REG_SZ /d "test.local" /f
-reg add "HKLM\SOFTWARE\AuthentikPasswordlessCP" /v IgnoreCertErrors /t REG_DWORD /d 1 /f
+# Or manually set:
+# HKLM\SOFTWARE\AuthentikCredentialProvider
+#   ServerUrl = "your-dc.domain.com"
+#   ServerPort = 8443 (DWORD)
+#   Domain = "YOURDOMAIN"
+#   VSCReaderName = "Microsoft Virtual Smart Card 0"
 ```
 
-### Step 4: Reboot
-
-```cmd
+### 4. Reboot
+```powershell
 shutdown /r /t 0
 ```
 
-### Step 5: Test
+---
 
-1. Start **DebugView** (as Administrator) before testing
-2. Press **Win+L** to lock
-3. Look for "**Authentik Passwordless Login**" tile
-4. Enter username → click Sign In
-5. Enter OTP code → click Verify
-6. Watch DebugView for `[AuthentikPwdlessCP]` messages
+## Test
 
-## Troubleshooting Quick Reference
+1. Press **Win+L** to lock
+2. Select **Authentik OTP Login** tile
+3. Enter **username** and **OTP code**
+4. Click **Sign in**
 
-| Problem | Solution |
-|---------|----------|
-| Tile doesn't appear | Reboot. Check `regsvr32` succeeded |
-| "Failed to connect" | Check `ServerUrl` in registry. Try `ping authentik.test.local` |
-| OTP fails | Check Authentik flow is configured correctly |
-| "No certificate" | Authentik must return certificate in response |
-| Login fails after OTP | Check DC trusts CA. See README for NTAuth setup |
+### Debug Logging
+- Download [DebugView](https://docs.microsoft.com/en-us/sysinternals/downloads/debugview)
+- Run as Administrator
+- Filter: `[AuthentikCP]`
 
-## Log Messages to Look For
-
-```
-✓ DLL_PROCESS_ATTACH - Authentik Passwordless Credential Provider
-✓ CAuthentikProvider::SetUsageScenario - cpus=1
-✓ Using Kerberos authentication package ID: X
-✓ InitiateAuthentication: user=mike
-✓ OTP required, transitioning to OTP step
-✓ SubmitOTP
-✓ OTP validated, certificate received
-✓ Certificate credentials packed successfully
-```
+---
 
 ## Uninstall
 
-```cmd
-regsvr32 /u C:\Windows\System32\AuthentikPasswordlessCP.dll
-del C:\Windows\System32\AuthentikPasswordlessCP.dll
+```powershell
+regsvr32 /u C:\Windows\System32\AuthentikCredentialProvider.dll
+del C:\Windows\System32\AuthentikCredentialProvider.dll
 shutdown /r /t 0
 ```
 
-## Next Steps
+---
 
-1. **Configure Authentik** - Set up flow with certificate issuance
-2. **Configure AD** - Trust Authentik CA in NTAuth store
-3. **Disable `IgnoreCertErrors`** - Use real certificates for production
-4. **Test thoroughly** - Always have recovery access (Safe Mode, local admin)
+## Troubleshooting
 
-See **README.md** for full documentation.
+| Issue | Solution |
+|-------|----------|
+| CP not visible | Reboot, verify regsvr32 succeeded |
+| OTP validation fails | Check CertIssuer service on DC |
+| Certificate import fails | Verify VSC exists, check PIN |
+| PKINIT fails | Check DC `StrongCertificateBindingEnforcement` |
+
+See [KNOWLEDGE_BASE.md](KNOWLEDGE_BASE.md) for detailed troubleshooting.
