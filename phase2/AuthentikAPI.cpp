@@ -341,6 +341,7 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     HINTERNET hSession = nullptr;
     HINTERNET hConnect = nullptr;
     HINTERNET hRequest = nullptr;
+    DWORD httpStatusCode = 0;
 
     // Initialize WinHTTP
     hSession = WinHttpOpen(
@@ -445,7 +446,6 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
     }
 
     // Check HTTP status code
-    DWORD httpStatusCode = 0;
     {
         DWORD statusCodeSize = sizeof(httpStatusCode);
         if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
