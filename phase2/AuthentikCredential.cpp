@@ -436,16 +436,16 @@ HRESULT CAuthentikCredential::_DoAuthentication(
     // Update status
     _SetStatusText(L"Authenticating...");
 
-    // Step 4: Pack KERB_CERTIFICATE_LOGON
-    LOG("Step 4: Packing KERB_CERTIFICATE_LOGON");
+    // Step 4: Pack KERB_SMARTCARD_LOGON (MessageType 6)
+    // This is the correct structure for smart card/VSC authentication
+    // User identity comes from certificate UPN, not from username field
+    LOG("Step 4: Packing KERB_SMARTCARD_LOGON");
     BYTE* pPackage = nullptr;
     DWORD cbPackage = 0;
 
     if (_cpus == CPUS_UNLOCK_WORKSTATION)
     {
-        hr = PackKerbCertificateUnlockLogon(
-            username,
-            _domain,
+        hr = PackKerbSmartCardUnlockLogon(
             _vscPin,
             vscInfo,
             &pPackage,
@@ -453,9 +453,7 @@ HRESULT CAuthentikCredential::_DoAuthentication(
     }
     else
     {
-        hr = PackKerbCertificateLogon(
-            username,
-            _domain,
+        hr = PackKerbSmartCardLogon(
             _vscPin,
             vscInfo,
             &pPackage,
