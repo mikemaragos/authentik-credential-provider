@@ -1,0 +1,7 @@
+// resource.rc
+// Resource script for AuthentikCredentialProvider
+
+#include "resource.h"
+
+// Tile image for credential provider
+IDB_TILE_IMAGE    BITMAP    "authentik_tile.bmp"
