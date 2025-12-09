@@ -17,13 +17,14 @@
 // KerbInteractiveLogon = 2
 // KerbSmartCardLogon = 6
 // KerbCertificateLogon = 13
-// KerbCertificateUnlockLogon = 14
+// KerbCertificateS4ULogon = 14
+// KerbCertificateUnlockLogon = 15
 #ifndef KerbCertificateLogon
 #define KerbCertificateLogon 13
 #endif
 
 #ifndef KerbCertificateUnlockLogon
-#define KerbCertificateUnlockLogon 14
+#define KerbCertificateUnlockLogon 15
 #endif
 
 // AT_KEYEXCHANGE if not defined
