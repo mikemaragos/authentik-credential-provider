@@ -348,3 +348,169 @@ HRESULT PackKerbCertificateUnlockLogon(
     LOG("PackKerbCertificateUnlockLogon: success, total size=%d bytes", cbTotal);
     return S_OK;
 }
+
+// Pack credentials for smart card logon (KERB_SMARTCARD_LOGON - MessageType 6)
+// This is the PREFERRED method for smart card/VSC authentication!
+// User identity comes from certificate UPN in SAN
+HRESULT PackKerbSmartCardLogon(
+    const std::wstring& pin,
+    const VSCInfo& vscInfo,
+    BYTE** ppPackage,
+    DWORD* pcbPackage)
+{
+    LOG("PackKerbSmartCardLogon: pin length=%d", (int)pin.length());
+
+    if (!ppPackage || !pcbPackage)
+        return E_INVALIDARG;
+
+    HRESULT hr;
+
+    // Build CSP info first
+    BYTE* pCspInfo = nullptr;
+    DWORD cbCspInfo = 0;
+    hr = BuildSmartCardCspInfo(vscInfo, &pCspInfo, &cbCspInfo);
+    if (FAILED(hr))
+    {
+        LOG("ERROR: BuildSmartCardCspInfo failed: 0x%08x", hr);
+        return hr;
+    }
+
+    // Calculate string sizes
+    DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
+
+    // Total size: structure + pin string + CSP info
+    DWORD cbTotal = sizeof(MY_KERB_SMARTCARD_LOGON) + cbPin + cbCspInfo;
+
+    LOG("SmartCard package sizes: struct=%d, pin=%d, csp=%d, total=%d",
+        (DWORD)sizeof(MY_KERB_SMARTCARD_LOGON), cbPin, cbCspInfo, cbTotal);
+
+    // Allocate buffer
+    BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
+    if (!pBuffer)
+    {
+        CoTaskMemFree(pCspInfo);
+        LOG("ERROR: Failed to allocate package buffer");
+        return E_OUTOFMEMORY;
+    }
+
+    ZeroMemory(pBuffer, cbTotal);
+
+    // Cast to structure
+    MY_KERB_SMARTCARD_LOGON* pLogon = (MY_KERB_SMARTCARD_LOGON*)pBuffer;
+
+    // Set message type - MUST be 6 for KerbSmartCardLogon
+    pLogon->MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbSmartCardLogon;
+
+    LOG("MessageType set to KerbSmartCardLogon (%d)", KerbSmartCardLogon);
+
+    // String buffer starts after structure
+    BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_SMARTCARD_LOGON);
+    ULONG currentOffset = sizeof(MY_KERB_SMARTCARD_LOGON);
+
+    // Copy PIN - Buffer is OFFSET from start of structure
+    memcpy(pStringBuffer, pin.c_str(), cbPin);
+    pLogon->Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
+    pLogon->Pin.MaximumLength = (USHORT)cbPin;
+    pLogon->Pin.Buffer = (PWSTR)(ULONG_PTR)currentOffset;  // Offset, not pointer
+    LOG("Pin: offset=%d, length=%d", currentOffset, pLogon->Pin.Length);
+    pStringBuffer += cbPin;
+    currentOffset += cbPin;
+
+    // Copy CSP info - CspData is OFFSET from start of structure
+    memcpy(pStringBuffer, pCspInfo, cbCspInfo);
+    pLogon->CspDataLength = cbCspInfo;
+    pLogon->CspData = (PUCHAR)(ULONG_PTR)currentOffset;  // Offset, not pointer
+    LOG("CspData: offset=%d, length=%d", currentOffset, cbCspInfo);
+
+    // Free temporary CSP info buffer
+    CoTaskMemFree(pCspInfo);
+
+    *ppPackage = pBuffer;
+    *pcbPackage = cbTotal;
+
+    LOG("PackKerbSmartCardLogon: success, total size=%d bytes", cbTotal);
+    return S_OK;
+}
+
+// Pack credentials for smart card unlock (KERB_SMARTCARD_UNLOCK_LOGON - MessageType 8)
+HRESULT PackKerbSmartCardUnlockLogon(
+    const std::wstring& pin,
+    const VSCInfo& vscInfo,
+    BYTE** ppPackage,
+    DWORD* pcbPackage)
+{
+    LOG("PackKerbSmartCardUnlockLogon: pin length=%d", (int)pin.length());
+
+    if (!ppPackage || !pcbPackage)
+        return E_INVALIDARG;
+
+    HRESULT hr;
+
+    // Build CSP info first
+    BYTE* pCspInfo = nullptr;
+    DWORD cbCspInfo = 0;
+    hr = BuildSmartCardCspInfo(vscInfo, &pCspInfo, &cbCspInfo);
+    if (FAILED(hr))
+    {
+        LOG("ERROR: BuildSmartCardCspInfo failed: 0x%08x", hr);
+        return hr;
+    }
+
+    // Calculate string sizes
+    DWORD cbPin = (DWORD)((pin.length() + 1) * sizeof(WCHAR));
+
+    // Total size: structure + pin string + CSP info
+    DWORD cbTotal = sizeof(MY_KERB_SMARTCARD_UNLOCK_LOGON) + cbPin + cbCspInfo;
+
+    LOG("SmartCard unlock package sizes: struct=%d, pin=%d, csp=%d, total=%d",
+        (DWORD)sizeof(MY_KERB_SMARTCARD_UNLOCK_LOGON), cbPin, cbCspInfo, cbTotal);
+
+    // Allocate buffer
+    BYTE* pBuffer = (BYTE*)CoTaskMemAlloc(cbTotal);
+    if (!pBuffer)
+    {
+        CoTaskMemFree(pCspInfo);
+        LOG("ERROR: Failed to allocate package buffer");
+        return E_OUTOFMEMORY;
+    }
+
+    ZeroMemory(pBuffer, cbTotal);
+
+    // Cast to structure
+    MY_KERB_SMARTCARD_UNLOCK_LOGON* pUnlock = (MY_KERB_SMARTCARD_UNLOCK_LOGON*)pBuffer;
+
+    // Set message type for unlock
+    pUnlock->Logon.MessageType = (KERB_LOGON_SUBMIT_TYPE)KerbSmartCardUnlockLogon;
+
+    LOG("MessageType set to KerbSmartCardUnlockLogon (%d)", KerbSmartCardUnlockLogon);
+
+    // LogonId = 0 for unlock
+    pUnlock->LogonId.LowPart = 0;
+    pUnlock->LogonId.HighPart = 0;
+
+    // String buffer starts after structure
+    BYTE* pStringBuffer = pBuffer + sizeof(MY_KERB_SMARTCARD_UNLOCK_LOGON);
+    ULONG currentOffset = sizeof(MY_KERB_SMARTCARD_UNLOCK_LOGON);
+
+    // Copy PIN - Buffer is OFFSET from start of structure
+    memcpy(pStringBuffer, pin.c_str(), cbPin);
+    pUnlock->Logon.Pin.Length = (USHORT)((pin.length()) * sizeof(WCHAR));
+    pUnlock->Logon.Pin.MaximumLength = (USHORT)cbPin;
+    pUnlock->Logon.Pin.Buffer = (PWSTR)(ULONG_PTR)currentOffset;
+    pStringBuffer += cbPin;
+    currentOffset += cbPin;
+
+    // Copy CSP info - CspData is OFFSET from start of structure
+    memcpy(pStringBuffer, pCspInfo, cbCspInfo);
+    pUnlock->Logon.CspDataLength = cbCspInfo;
+    pUnlock->Logon.CspData = (PUCHAR)(ULONG_PTR)currentOffset;
+
+    // Free temporary CSP info buffer
+    CoTaskMemFree(pCspInfo);
+
+    *ppPackage = pBuffer;
+    *pcbPackage = cbTotal;
+
+    LOG("PackKerbSmartCardUnlockLogon: success, total size=%d bytes", cbTotal);
+    return S_OK;
+}
