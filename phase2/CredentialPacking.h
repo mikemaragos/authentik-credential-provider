@@ -89,6 +89,8 @@ typedef struct _MY_KERB_CERTIFICATE_UNLOCK_LOGON {
 
 // KERB_SMARTCARD_LOGON structure - SIMPLER structure for smart card auth
 // User identity comes from certificate UPN in SAN, NOT from username field!
+// Must match Windows SDK layout exactly
+#pragma pack(push, 8)
 typedef struct _MY_KERB_SMARTCARD_LOGON {
     KERB_LOGON_SUBMIT_TYPE MessageType;  // Must be KerbSmartCardLogon (6)
     UNICODE_STRING Pin;                   // Smart card PIN
@@ -101,6 +103,7 @@ typedef struct _MY_KERB_SMARTCARD_UNLOCK_LOGON {
     MY_KERB_SMARTCARD_LOGON Logon;
     LUID LogonId;
 } MY_KERB_SMARTCARD_UNLOCK_LOGON, *PMY_KERB_SMARTCARD_UNLOCK_LOGON;
+#pragma pack(pop)
 
 // Pack credentials for smart card certificate logon (KERB_CERTIFICATE_LOGON - MessageType 13)
 // Note: This might not work for VSC - use PackKerbSmartCardLogon instead
