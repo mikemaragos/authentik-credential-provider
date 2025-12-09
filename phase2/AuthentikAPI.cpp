@@ -167,6 +167,19 @@ AuthentikResponse AuthentikAPI::ValidateOTP(const std::wstring& username, const 
         L"",
         responseBody);
 
+    // Log response even on failure
+    if (!responseBody.empty())
+    {
+        if (responseBody.length() < 500)
+        {
+            LOG("ValidateOTP: POST response: %S", responseBody.c_str());
+        }
+        else
+        {
+            LOG("ValidateOTP: POST response (truncated): %S...", responseBody.substr(0, 500).c_str());
+        }
+    }
+
     if (FAILED(hr))
     {
         LOG("ValidateOTP: POST username failed: 0x%08x", hr);
@@ -431,6 +444,21 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
         goto cleanup;
     }
 
+    // Check HTTP status code
+    DWORD httpStatusCode = 0;
+    {
+        DWORD statusCodeSize = sizeof(httpStatusCode);
+        if (WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                               WINHTTP_HEADER_NAME_BY_INDEX, &httpStatusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX))
+        {
+            LOG("HTTP Status Code: %d", httpStatusCode);
+            if (httpStatusCode >= 400)
+            {
+                LOG("HTTP Error: %d", httpStatusCode);
+            }
+        }
+    }
+
     // Store cookies from response
     {
         WCHAR cookieBuffer[4096];
@@ -476,6 +504,24 @@ HRESULT AuthentikAPI::_MakeHttpRequest(
                 responseBody = &wideBuffer[0];
                 LOG("Response received: %d bytes", responseBuffer.size());
                 hr = S_OK;
+            }
+            else
+            {
+                LOG("MultiByteToWideChar failed for response");
+                hr = E_FAIL;
+            }
+        }
+        else
+        {
+            // Empty response body - still consider success if HTTP status is OK
+            LOG("Response body is empty");
+            if (httpStatusCode >= 200 && httpStatusCode < 300)
+            {
+                hr = S_OK;
+            }
+            else
+            {
+                hr = HRESULT_FROM_WIN32(httpStatusCode);
             }
         }
     }
