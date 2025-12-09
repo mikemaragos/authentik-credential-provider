@@ -1,147 +1,146 @@
 // CredentialPacking.h
-// Header for credential serialization functions - Phase 2 (Smart Card/Certificate)
-// December 8, 2025
+// Header for smart card credential serialization
+// 
+// CRITICAL IMPLEMENTATION NOTES:
+// 1. KERB_SMARTCARD_CSP_INFO requires 1-byte packing (#pragma pack(push, 1))
+// 2. CSP INFO MessageType is ALWAYS 1 (not the logon type!)
+// 3. CSP INFO string offsets are CHARACTER COUNT (WCHAR units), NOT bytes
+// 4. For credential providers, UNICODE_STRING.Buffer is a BYTE OFFSET, not pointer
+// 5. All data must be in a single contiguous memory block
+//
+// References:
+// - IDRIX LsaSmartCardLogon.cpp: http://www.idrix.fr/Root/Samples/LsaSmartCardLogon.cpp
+// - Microsoft helpers.cpp: github.com/microsoft/Windows-classic-samples/blob/main/Samples/CredentialProvider/cpp/helpers.cpp
+// - Microsoft KERB_SMARTCARD_CSP_INFO: learn.microsoft.com/en-us/windows/win32/secauthn/kerb-smartcard-csp-info
 
 #pragma once
 
 #include <windows.h>
-#include <wincrypt.h>
-#include <NTSecAPI.h>
-#include <objbase.h>
+#include <ntsecapi.h>
 #include <string>
-#include <vector>
 
-#pragma comment(lib, "ole32.lib")
-
-// KERB_CERTIFICATE_LOGON message types (from KERB_LOGON_SUBMIT_TYPE enum)
-// KerbInteractiveLogon = 2
-// KerbSmartCardLogon = 6          <-- USE THIS for smart card with PIN + CSP
-// KerbSmartCardUnlockLogon = 8    <-- USE THIS for smart card unlock
-// KerbCertificateLogon = 13       <-- For certificate without smart card (different scenario)
-// KerbCertificateS4ULogon = 14
-// KerbCertificateUnlockLogon = 15
-
-#ifndef KerbSmartCardLogon
-#define KerbSmartCardLogon 6
+// KeySpec values from WinCrypt.h
+#ifndef AT_KEYEXCHANGE
+#define AT_KEYEXCHANGE 1
+#endif
+#ifndef AT_SIGNATURE
+#define AT_SIGNATURE 2
 #endif
 
-#ifndef KerbSmartCardUnlockLogon  
-#define KerbSmartCardUnlockLogon 8
-#endif
-
+// KERB_CERTIFICATE_LOGON MessageType values
+// Note: These are defined in ntsecapi.h but may not be available in all SDK versions
 #ifndef KerbCertificateLogon
 #define KerbCertificateLogon 13
 #endif
-
 #ifndef KerbCertificateUnlockLogon
 #define KerbCertificateUnlockLogon 15
 #endif
 
-// AT_KEYEXCHANGE if not defined
-#ifndef AT_KEYEXCHANGE
-#define AT_KEYEXCHANGE 1
-#endif
-
-// VSC (Virtual Smart Card) information - single definition
-struct VSCInfo {
-    std::wstring readerName;      // e.g., "Microsoft Virtual Smart Card 0"
-    std::wstring containerName;   // Key container name
-    std::wstring cspName;         // "Microsoft Base Smart Card Crypto Provider"
-    std::wstring cardName;        // Card name (can be empty)
-};
-
-// KERB_SMARTCARD_CSP_INFO structure
-// This structure is not fully documented in the SDK
+//=============================================================================
+// KERB_SMARTCARD_CSP_INFO Structure
+//
+// CRITICAL: This structure requires 1-byte packing!
+// CRITICAL: MessageType must ALWAYS be 1 (not the logon type!)
+// CRITICAL: Offsets are CHARACTER COUNT (WCHAR units), not bytes!
+//
+// From Microsoft documentation:
+// "The type of message being passed. This member must be set to 1."
+// "The number of characters in the bBuffer buffer that precede the name..."
+//=============================================================================
 #pragma pack(push, 1)
-typedef struct _MY_KERB_SMARTCARD_CSP_INFO {
-    DWORD dwCspInfoLen;         // Total length of this structure including strings
-    DWORD MessageType;          // Must be 1
-    union {
-        PVOID ContextInformation;
-        ULONG64 SpaceHolderForWow64;
-    };
-    DWORD flags;                // 0
-    DWORD KeySpec;              // AT_KEYEXCHANGE = 1
-    ULONG nCardNameOffset;      // Offset to card name in bBuffer
-    ULONG nReaderNameOffset;    // Offset to reader name in bBuffer
-    ULONG nContainerNameOffset; // Offset to container name in bBuffer
-    ULONG nCSPNameOffset;       // Offset to CSP name in bBuffer
-    WCHAR bBuffer[1];           // Variable length buffer containing strings
+typedef struct _MY_KERB_SMARTCARD_CSP_INFO
+{   
+    DWORD dwCspInfoLen;              // Total size in BYTES (including strings)
+    DWORD MessageType;               // MUST be 1 (not logon type!)
+    union {     
+        PVOID ContextInformation;    // Not used
+        ULONG64 SpaceHolderForWow64; // For 32/64-bit compatibility
+    }; 
+    DWORD flags;                     // Usually 0
+    DWORD KeySpec;                   // AT_KEYEXCHANGE (1) or AT_SIGNATURE (2)
+    ULONG nCardNameOffset;           // CHARACTER offset to card name in bBuffer
+    ULONG nReaderNameOffset;         // CHARACTER offset to reader name
+    ULONG nContainerNameOffset;      // CHARACTER offset to container name
+    ULONG nCSPNameOffset;            // CHARACTER offset to CSP name
+    TCHAR bBuffer;                   // Start of string buffer (placeholder)
 } MY_KERB_SMARTCARD_CSP_INFO, *PMY_KERB_SMARTCARD_CSP_INFO;
 #pragma pack(pop)
 
-// KERB_CERTIFICATE_LOGON structure (custom definition to avoid SDK conflicts)
-typedef struct _MY_KERB_CERTIFICATE_LOGON {
-    KERB_LOGON_SUBMIT_TYPE MessageType;  // KerbCertificateLogon or KerbCertificateUnlockLogon
-    UNICODE_STRING DomainName;
-    UNICODE_STRING UserName;
-    UNICODE_STRING Pin;
-    ULONG Flags;                // 0
-    ULONG CspDataLength;        // Size of CspData
-    PUCHAR CspData;             // Points to MY_KERB_SMARTCARD_CSP_INFO
-} MY_KERB_CERTIFICATE_LOGON, *PMY_KERB_CERTIFICATE_LOGON;
+//=============================================================================
+// Virtual Smart Card Information Structure
+//=============================================================================
+struct VSCInfo
+{
+    std::wstring readerName;         // e.g., "Microsoft Virtual Smart Card 0"
+    std::wstring containerName;      // Certificate container/thumbprint
+    std::wstring cspName;            // e.g., "Microsoft Base Smart Card Crypto Provider"
+    std::wstring cardName;           // Usually empty string ""
+    std::wstring pin;                // VSC PIN
+};
 
-// KERB_CERTIFICATE_UNLOCK_LOGON structure (for unlock scenarios)
-typedef struct _MY_KERB_CERTIFICATE_UNLOCK_LOGON {
-    MY_KERB_CERTIFICATE_LOGON Logon;
-    LUID LogonId;
-} MY_KERB_CERTIFICATE_UNLOCK_LOGON, *PMY_KERB_CERTIFICATE_UNLOCK_LOGON;
+//=============================================================================
+// Function Declarations
+//=============================================================================
 
-// KERB_SMARTCARD_LOGON structure - SIMPLER structure for smart card auth
-// User identity comes from certificate UPN in SAN, NOT from username field!
-// Must match Windows SDK layout exactly
-#pragma pack(push, 8)
-typedef struct _MY_KERB_SMARTCARD_LOGON {
-    KERB_LOGON_SUBMIT_TYPE MessageType;  // Must be KerbSmartCardLogon (6)
-    UNICODE_STRING Pin;                   // Smart card PIN
-    ULONG CspDataLength;                  // Length of CSP data
-    PUCHAR CspData;                       // Pointer to CSP info
-} MY_KERB_SMARTCARD_LOGON, *PMY_KERB_SMARTCARD_LOGON;
-
-// KERB_SMARTCARD_UNLOCK_LOGON structure - for workstation unlock
-typedef struct _MY_KERB_SMARTCARD_UNLOCK_LOGON {
-    MY_KERB_SMARTCARD_LOGON Logon;
-    LUID LogonId;
-} MY_KERB_SMARTCARD_UNLOCK_LOGON, *PMY_KERB_SMARTCARD_UNLOCK_LOGON;
-#pragma pack(pop)
-
-// Pack credentials for smart card certificate logon (KERB_CERTIFICATE_LOGON - MessageType 13)
-// Note: This might not work for VSC - use PackKerbSmartCardLogon instead
+// Pack credentials for smart card certificate logon (credential provider format)
+// Returns: S_OK on success, error HRESULT on failure
+// 
+// Parameters:
+//   username     - User name (optional, helps KDC find account)
+//   domain       - Domain name (optional, uppercase for Kerberos realm)
+//   vscInfo      - Virtual smart card information
+//   isUnlock     - true for unlock, false for logon
+//   ppPackage    - [out] Receives allocated buffer (CoTaskMemAlloc)
+//   pcbPackage   - [out] Receives buffer size in bytes
+//
+// NOTES:
+// - Buffer is allocated with CoTaskMemAlloc (caller must free)
+// - UNICODE_STRING.Buffer values are BYTE OFFSETS, not pointers
+// - CSP data is embedded at the end of the buffer
+// - All strings are packed contiguously after the structure
 HRESULT PackKerbCertificateLogon(
     const std::wstring& username,
     const std::wstring& domain,
-    const std::wstring& pin,
     const VSCInfo& vscInfo,
+    bool isUnlock,
     BYTE** ppPackage,
     DWORD* pcbPackage);
 
-// Pack credentials for smart card certificate unlock
-HRESULT PackKerbCertificateUnlockLogon(
-    const std::wstring& username,
-    const std::wstring& domain,
-    const std::wstring& pin,
-    const VSCInfo& vscInfo,
-    BYTE** ppPackage,
-    DWORD* pcbPackage);
-
-// Pack credentials for smart card logon (KERB_SMARTCARD_LOGON - MessageType 6)
-// This is the PREFERRED method for smart card authentication!
-// User identity comes from certificate UPN, not from username parameter
-HRESULT PackKerbSmartCardLogon(
-    const std::wstring& pin,
-    const VSCInfo& vscInfo,
-    BYTE** ppPackage,
-    DWORD* pcbPackage);
-
-// Pack credentials for smart card unlock (KERB_SMARTCARD_UNLOCK_LOGON - MessageType 8)
-HRESULT PackKerbSmartCardUnlockLogon(
-    const std::wstring& pin,
-    const VSCInfo& vscInfo,
-    BYTE** ppPackage,
-    DWORD* pcbPackage);
-
-// Helper to build KERB_SMARTCARD_CSP_INFO
+// Build KERB_SMARTCARD_CSP_INFO structure with string data
+// Returns: S_OK on success, error HRESULT on failure
+//
+// Parameters:
+//   vscInfo      - Virtual smart card information
+//   ppCspInfo    - [out] Receives allocated buffer (HeapAlloc)
+//   pcbCspInfo   - [out] Receives buffer size in bytes
+//
+// NOTES:
+// - Uses 1-byte packing
+// - MessageType is set to 1 (not logon type!)
+// - Offsets are CHARACTER COUNT (WCHAR units)
 HRESULT BuildSmartCardCspInfo(
     const VSCInfo& vscInfo,
     BYTE** ppCspInfo,
     DWORD* pcbCspInfo);
+
+// Helper: Calculate the size of a packed KERB_CERTIFICATE_LOGON structure
+DWORD CalculatePackedCertificateLogonSize(
+    const std::wstring& username,
+    const std::wstring& domain,
+    const std::wstring& pin,
+    DWORD cbCspInfo);
+
+// Legacy functions from Phase 1 (for fallback to password auth)
+HRESULT PackKerbInteractiveLogon(
+    const std::wstring& username,
+    const std::wstring& password,
+    const std::wstring& domain,
+    BYTE** ppPackage,
+    DWORD* pcbPackage);
+
+HRESULT PackKerbInteractiveUnlockLogon(
+    const std::wstring& username,
+    const std::wstring& password,
+    const std::wstring& domain,
+    BYTE** ppPackage,
+    DWORD* pcbPackage);
